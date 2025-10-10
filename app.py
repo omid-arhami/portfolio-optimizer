@@ -42,11 +42,37 @@ def download_data(tickers, start_date, end_date):
     # Download all valid tickers
     data = yf.download(valid_tickers, start=start_date, end=end_date, progress=False)
     
-    if len(valid_tickers) == 1:
-        prices = data['Adj Close'].to_frame()
-        prices.columns = valid_tickers
+    # Handle different yfinance return structures
+    if data.empty:
+        st.error("❌ No data downloaded!")
+        return None
+    
+    # Check if data has MultiIndex columns (multiple tickers)
+    if isinstance(data.columns, pd.MultiIndex):
+        # MultiIndex structure: (Price, Ticker)
+        if 'Adj Close' in data.columns.levels[0]:
+            prices = data['Adj Close']
+        else:
+            st.error("❌ 'Adj Close' column not found in data!")
+            return None
     else:
-        prices = data['Adj Close']
+        # Single ticker or flat column structure
+        if len(valid_tickers) == 1:
+            prices = data[['Adj Close']].copy()
+            prices.columns = valid_tickers
+        else:
+            # Try to extract Adj Close
+            if 'Adj Close' in data.columns:
+                prices = data[['Adj Close']].copy()
+                prices.columns = valid_tickers
+            else:
+                st.error("❌ 'Adj Close' column not found in data!")
+                return None
+    
+    # Ensure prices is a DataFrame
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame()
+        prices.columns = valid_tickers
     
     return prices
 
