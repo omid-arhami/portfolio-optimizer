@@ -196,26 +196,33 @@ def optimize_portfolio(mu, Sigma, rf, allow_short=False):
         st.error(f"Optimization failed: {result.message}")
         return None
 
-def allocate_risky_riskfree(optimal_portfolio, rf, risk_aversion):
+def allocate_risky_riskfree(optimal_portfolio, rf_percent, risk_aversion):
     """Determine allocation between the optimal risky portfolio and the risk-free asset"""
-    mu_p = optimal_portfolio['return']
-    sigma_p_sq = optimal_portfolio['volatility']**2
+    # Convert all inputs from percentage to decimal for calculation
+    mu_p_decimal = optimal_portfolio['return'] / 100
+    sigma_p_decimal = optimal_portfolio['volatility'] / 100
+    rf_decimal = rf_percent / 100
     
-    if sigma_p_sq == 0 or risk_aversion == 0:
-        # If risky portfolio has no risk or investor has no risk aversion, logic changes
-        # This is a fallback to avoid division by zero.
-        alpha = 1.0 if mu_p > rf else 0.0
+    # Calculate variance in decimal
+    sigma_p_sq_decimal = sigma_p_decimal ** 2
+    
+    # Avoid division by zero
+    if sigma_p_sq_decimal == 0 or risk_aversion == 0:
+        alpha = 1.0 if mu_p_decimal > rf_decimal else 0.0
     else:
-        # Optimal allocation to risky portfolio (alpha)
-        alpha = (mu_p - rf) / (risk_aversion * sigma_p_sq)
+        # Calculate optimal allocation to risky portfolio (alpha) using decimal values
+        excess_return_decimal = mu_p_decimal - rf_decimal
+        alpha = excess_return_decimal / (risk_aversion * sigma_p_sq_decimal)
     
     # We don't allow borrowing, so alpha is capped at 100%
     alpha = np.clip(alpha, 0, 1)
     
-    final_return = alpha * mu_p + (1 - alpha) * rf
-    final_vol = alpha * optimal_portfolio['volatility']
+    # Calculate final portfolio stats and convert back to percentage for display
+    final_return_percent = (alpha * mu_p_decimal + (1 - alpha) * rf_decimal) * 100
+    final_vol_percent = (alpha * sigma_p_decimal) * 100
     
-    return {'alpha': alpha, 'final_return': final_return, 'final_volatility': final_vol}
+    return {'alpha': alpha, 'final_return': final_return_percent, 'final_volatility': final_vol_percent}
+
 
 def calculate_risk_metrics(returns, weights, confidence=0.95):
     """Calculate VaR, CVaR, and Max Drawdown for the portfolio"""
