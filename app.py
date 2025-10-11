@@ -220,37 +220,53 @@ def black_litterman(Sigma_percent_sq, w_strategic, rf_percent, tau=0.025, P=None
 def optimize_portfolio(mu, Sigma, rf, allow_short=False):
     """Optimize portfolio for maximum Sharpe ratio (Tangency Portfolio)"""
     n = len(mu)
-    rf_decimal = rf / 100  # Ensure RF rate is in decimal for calculation
-
-    # Objective function: minimize the negative Sharpe ratio
+    rf_decimal = rf / 100
+    
+    # Objective function: minimize negative Sharpe ratio
     def neg_sharpe(w):
-        # Ensure weights sum to 1 to avoid division by zero issues
-        w = w / np.sum(w)
-        port_return_decimal = w @ mu / 100
+        # DON'T renormalize here - constraint handles it
+        port_return_decimal = (w @ mu) / 100
         port_vol_decimal = np.sqrt(w @ Sigma @ w) / 100
         if port_vol_decimal == 0:
-            return 1e9 # Return a large number if volatility is zero
-        return -(port_return_decimal - rf_decimal) / port_vol_decimal
+            return 1e9
+        sharpe = (port_return_decimal - rf_decimal) / port_vol_decimal
+        return -sharpe
     
     # Constraints and bounds
     constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1}]
     bounds = tuple((0, 1) for _ in range(n)) if not allow_short else None
     
-    w0 = np.array([1/n] * n) # Initial guess: equal weights
+    # Multiple starting points to avoid local minima
+    best_result = None
+    best_sharpe = -np.inf
     
-    result = minimize(neg_sharpe, w0, method='SLSQP', bounds=bounds, constraints=constraints)
-    
-    if result.success:
-        weights = result.x
-        # Recalculate portfolio stats based on final weights in percentage terms
-        port_return = weights @ mu
-        port_vol = np.sqrt(weights @ Sigma @ weights)
-        sharpe = (port_return - rf) / port_vol if port_vol > 0 else 0
+    for _ in range(5):  # Try 5 different starting points
+        w0 = np.random.dirichlet(np.ones(n))  # Random weights that sum to 1
         
-        return {'weights': weights, 'return': port_return, 'volatility': port_vol, 'sharpe': sharpe}
-    else:
-        st.error(f"Optimization failed: {result.message}")
+        result = minimize(neg_sharpe, w0, method='SLSQP', bounds=bounds, 
+                         constraints=constraints, options={'ftol': 1e-9})
+        
+        if result.success:
+            weights = result.x
+            port_return = (weights @ mu)
+            port_vol = np.sqrt(weights @ Sigma @ weights)
+            sharpe = (port_return - rf) / port_vol if port_vol > 0 else 0
+            
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_result = {'weights': weights, 'return': port_return, 
+                              'volatility': port_vol, 'sharpe': sharpe}
+    
+    if best_result is None:
+        st.error("Optimization failed with all starting points")
         return None
+        
+    # Validation
+    weight_std = np.std(best_result['weights'])
+    if weight_std < 0.01:
+        st.warning(f"⚠️ Optimization produced nearly equal weights (std={weight_std:.4f}). Expected returns may be too similar.")
+    
+    return best_result
 
 def allocate_risky_riskfree(optimal_portfolio, rf_percent, risk_aversion):
     """Determine allocation between the optimal risky portfolio and the risk-free asset"""
