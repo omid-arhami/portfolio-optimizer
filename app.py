@@ -25,7 +25,8 @@ def download_data(tickers, start_date, end_date):
     data.dropna(axis=1, how='all', inplace=True)
     
     # Forward-fill and back-fill to handle sporadic missing values
-    data.ffill(inplace=True).bfill(inplace=True)
+    data.ffill(inplace=True)
+    data.bfill(inplace=True)
 
     if data.empty:
         st.error("❌ No data could be downloaded for the selected tickers. Please check the symbols.")
@@ -420,3 +421,4 @@ else:
 
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational purposes only and does not constitute financial advice. Data is sourced from Yahoo Finance. Past performance is not indicative of future results.")
+
