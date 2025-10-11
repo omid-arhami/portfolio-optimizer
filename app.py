@@ -39,52 +39,37 @@ def download_data(tickers, start_date, end_date):
         st.error("❌ No valid tickers found!")
         return None
     
-    # Download all valid tickers
-    data = yf.download(valid_tickers, start=start_date, end=end_date, progress=False)
+    # Download all valid tickers with auto_adjust=True to get adjusted prices
+    data = yf.download(valid_tickers, start=start_date, end=end_date, 
+                       progress=False, auto_adjust=True)
     
-    # ============ DIAGNOSTIC INFORMATION ============
-    st.write("### 🔍 DEBUG: Data Structure Analysis")
-    st.write(f"**Valid tickers:** {valid_tickers}")
-    st.write(f"**Data shape:** {data.shape}")
-    st.write(f"**Data type:** {type(data)}")
-    st.write(f"**Columns type:** {type(data.columns)}")
-    st.write(f"**Columns:** {list(data.columns)}")
-    
-    if isinstance(data.columns, pd.MultiIndex):
-        st.write(f"**MultiIndex levels:** {data.columns.levels}")
-        st.write(f"**Level 0 (Price types):** {list(data.columns.levels[0])}")
-        st.write(f"**Level 1 (Tickers):** {list(data.columns.levels[1])}")
-    
-    st.write("**First few rows:**")
-    st.dataframe(data.head())
-    # ============ END DIAGNOSTIC ============
-    
-    # Handle different yfinance return structures
     if data.empty:
         st.error("❌ No data downloaded!")
         return None
     
-    # Check if data has MultiIndex columns (multiple tickers)
+    # With auto_adjust=True, 'Close' is already adjusted
+    # Handle different yfinance return structures
     if isinstance(data.columns, pd.MultiIndex):
         # MultiIndex structure: (Price, Ticker)
-        if 'Adj Close' in data.columns.levels[0]:
+        # Try 'Close' first (auto-adjusted), fall back to 'Adj Close'
+        if 'Close' in data.columns.levels[0]:
+            prices = data['Close']
+        elif 'Adj Close' in data.columns.levels[0]:
             prices = data['Adj Close']
         else:
-            st.error("❌ 'Adj Close' column not found in data!")
+            st.error("❌ Neither 'Close' nor 'Adj Close' column found in data!")
             return None
     else:
-        # Single ticker or flat column structure
-        if len(valid_tickers) == 1:
+        # Single ticker - data is already a simple DataFrame
+        if 'Close' in data.columns:
+            prices = data[['Close']].copy()
+            prices.columns = valid_tickers
+        elif 'Adj Close' in data.columns:
             prices = data[['Adj Close']].copy()
             prices.columns = valid_tickers
         else:
-            # Try to extract Adj Close
-            if 'Adj Close' in data.columns:
-                prices = data[['Adj Close']].copy()
-                prices.columns = valid_tickers
-            else:
-                st.error("❌ 'Adj Close' column not found in data!")
-                return None
+            st.error("❌ Neither 'Close' nor 'Adj Close' column found in data!")
+            return None
     
     # Ensure prices is a DataFrame
     if isinstance(prices, pd.Series):
