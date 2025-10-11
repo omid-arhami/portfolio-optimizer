@@ -42,6 +42,23 @@ def download_data(tickers, start_date, end_date):
     # Download all valid tickers
     data = yf.download(valid_tickers, start=start_date, end=end_date, progress=False)
     
+    # ============ DIAGNOSTIC INFORMATION ============
+    st.write("### 🔍 DEBUG: Data Structure Analysis")
+    st.write(f"**Valid tickers:** {valid_tickers}")
+    st.write(f"**Data shape:** {data.shape}")
+    st.write(f"**Data type:** {type(data)}")
+    st.write(f"**Columns type:** {type(data.columns)}")
+    st.write(f"**Columns:** {list(data.columns)}")
+    
+    if isinstance(data.columns, pd.MultiIndex):
+        st.write(f"**MultiIndex levels:** {data.columns.levels}")
+        st.write(f"**Level 0 (Price types):** {list(data.columns.levels[0])}")
+        st.write(f"**Level 1 (Tickers):** {list(data.columns.levels[1])}")
+    
+    st.write("**First few rows:**")
+    st.dataframe(data.head())
+    # ============ END DIAGNOSTIC ============
+    
     # Handle different yfinance return structures
     if data.empty:
         st.error("❌ No data downloaded!")
