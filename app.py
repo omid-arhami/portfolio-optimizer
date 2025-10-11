@@ -13,10 +13,10 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Portfolio Optimizer", page_icon="📊", layout="wide")
 
 # ============================================================================
-# HELPER FUNCTIONS (Corrected & Refined)
+# HELPER FUNCTIONS
 # ============================================================================
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour
+@st.cache_data(ttl=36000)  # Cache for 10 hours
 def download_data(tickers, start_date, end_date):
     """Download historical data with robust error handling"""
     data = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=True)['Close']
@@ -40,154 +40,57 @@ def download_data(tickers, start_date, end_date):
         
     return data
 
-def get_strategic_weights(tickers, custom_weights=None):
-    """
-    Get strategic weights for equilibrium calculation.
-    
-    For ETFs and curated portfolios, equal weights or user-defined strategic 
-    weights make more sense than market cap weights.
-    
-    Args:
-        tickers: List of ticker symbols
-        custom_weights: Optional dict of {ticker: weight} for custom strategic allocation
-    
-    Returns:
-        weights: numpy array of weights (sum to 1)
-        tickers: list of tickers (unchanged)
-    """
-    
-    if custom_weights and len(custom_weights) > 0:
-        # Use custom strategic weights
-        weights = np.array([custom_weights.get(ticker, 0) for ticker in tickers])
-        total = weights.sum()
-        
-        if total == 0:
-            st.error("❌ Custom weights sum to zero. Using equal weights.")
-            weights = np.array([1/len(tickers)] * len(tickers))
-        else:
-            weights = weights / total  # Normalize to sum to 1
-            
-        # Display custom weights
-        with st.expander("📊 View Strategic Weights (Custom)"):
-            weight_df = pd.DataFrame({
-                'Ticker': tickers,
-                'Strategic Weight': weights * 100
-            }).sort_values('Strategic Weight', ascending=False)
-            st.dataframe(weight_df.style.format({'Strategic Weight': '{:.2f}%'}), use_container_width=True)
-        
-        st.success(f"✅ Using custom strategic weights for equilibrium calculation")
-    else:
-        # Use equal weights (default for curated portfolios)
-        weights = np.array([1/len(tickers)] * len(tickers))
-        st.success(f"✅ Using equal weights for equilibrium calculation ({100/len(tickers):.1f}% each)")
-        
-        with st.expander("💡 Why equal weights?"):
-            st.markdown("""
-            **Equal weights** are appropriate when:
-            - You've curated a selection of ETFs/assets you want to hold
-            - Each asset represents a strategic choice (e.g., stocks, bonds, gold)
-            - You don't have a strong prior view on relative importance
-            
-            **This is the starting point** for equilibrium returns. The optimizer
-            will still find the optimal allocation based on risk/return characteristics.
-            
-            **Note**: Market cap is NOT used because:
-            - ETF market cap ≠ importance of what the ETF represents
-            - You're building a strategic portfolio, not replicating "the market"
-            """)
-    
-    return weights, tickers
+@st.cache_data(ttl=36000) # Cache for 10 hours
+def get_market_cap_weights(tickers):
+    """Get market capitalization weights with robust error handling"""
+    market_caps = {}
+    failed_tickers = []
 
+    with st.spinner("Fetching market capitalization / asset-size data..."):
+        for ticker in tickers:
+            try:
+                info = yf.Ticker(ticker).info
 
-def calculate_returns(prices, frequency='weekly'):
-    """Calculate arithmetic returns at specified frequency"""
-    if frequency == 'weekly':
-        resample_rule = 'W-FRI' # Use Friday to ensure consistency
-        prices_resampled = prices.resample(resample_rule).last()
-    elif frequency == 'monthly':
-        resample_rule = 'M'
-        prices_resampled = prices.resample(resample_rule).last()
-    else: # Daily
-        prices_resampled = prices
+                # Heuristic to detect ETFs vs equities
+                # Prefer 'totalAssets' for ETFs (many funds expose this key)
+                is_etf = False
+                if 'totalAssets' in info and info.get('totalAssets') is not None:
+                    is_etf = True
+                elif str(info.get('quoteType', '')).upper() == 'ETF':
+                    is_etf = True
+                elif info.get('fundFamily') is not None or info.get('category') is not None or info.get('netAssets') is not None:
+                    is_etf = True
+
+                # Choose the appropriate size metric
+                if is_etf:
+                    mc = info.get('totalAssets') or info.get('netAssets') or info.get('marketCap')
+                else:
+                    mc = info.get('marketCap') or info.get('totalAssets')
+
+                # Accept only positive numeric sizes
+                if mc and isinstance(mc, (int, float)) and mc > 0:
+                    market_caps[ticker] = mc
+                else:
+                    failed_tickers.append(ticker)
+            except Exception:
+                failed_tickers.append(ticker)
+    # Return raw fetched sizes and list of failed tickers for UI handling
+    return market_caps, failed_tickers
     
-    returns = prices_resampled.pct_change().dropna()
-    return returns
-
-# Calculate expected returns using equilibrium or historical method
-def calculate_expected_returns(returns, Sigma_decimal, w_strategic, rf_rate_percent, method='equilibrium'):
+def black_litterman(Sigma_percent_sq, w_market, rf_percent, tau=0.025, P=None, Q_percent=None):
     """
-    Calculate expected returns using equilibrium or historical methods.
-    
-    Args:
-        returns: DataFrame of asset returns
-        Sigma_decimal: Covariance matrix in decimal form
-        w_strategic: Strategic portfolio weights (equal or custom, NOT market cap)
-        rf_rate_percent: Risk-free rate in percentage
-        method: 'equilibrium' or 'historical'
-    
-    Returns:
-        mu: Expected returns in annual percentage
+    Black-Litterman model implementation.
+    This function now correctly handles all unit conversions internally.
     """
-    periods_per_year = 52 if st.session_state.frequency == 'weekly' else 12
-    
-    if method == 'historical':
-        # Historical average - simple but unstable
-        mu = returns.mean() * periods_per_year * 100
-        return mu
-    
-    elif method == 'equilibrium':
-        # Strategic equilibrium returns (Black-Litterman inspired)
-        # Uses strategic weights (equal or custom) as the baseline "market"
-        # All calculations in decimal form
-        market_risk_premium_decimal = 0.06  # Assumed historical equity risk premium (6%)
-        rf_decimal = rf_rate_percent / 100
-
-        # Calculate strategic portfolio variance in decimal
-        var_strategic_decimal = w_strategic @ Sigma_decimal @ w_strategic
-        if var_strategic_decimal == 0:
-            st.error("Strategic portfolio variance is zero. Cannot calculate equilibrium returns.")
-            return pd.Series([rf_rate_percent] * len(returns.columns), index=returns.columns)
-
-        # Implied risk aversion parameter (lambda or delta)
-        lambda_risk = market_risk_premium_decimal / var_strategic_decimal
-        
-        # Implied equilibrium excess returns (Pi vector) in decimal
-        Pi_decimal = lambda_risk * (Sigma_decimal @ w_strategic)
-        
-        # Add risk-free rate to get total expected returns
-        mu_decimal_total = Pi_decimal + rf_decimal
-        
-        # Return as annualized percentage
-        return pd.Series(mu_decimal_total, index=returns.columns) * 100
-    
-    # Fallback to historical if method is not recognized
-    return returns.mean() * periods_per_year * 100
-
-# CRITICAL FIX: Corrected the Black-Litterman model implementation
-def black_litterman(Sigma_percent_sq, w_strategic, rf_percent, tau=0.025, P=None, Q_percent=None):
-    """
-    Black-Litterman model implementation using strategic weights.
-    
-    Args:
-        Sigma_percent_sq: Covariance matrix in percentage-squared
-        w_strategic: Strategic portfolio weights (equal or custom)
-        rf_percent: Risk-free rate in percentage
-        tau: Uncertainty scaling factor (default 0.025)
-        P: Pick matrix for views (optional)
-        Q_percent: View returns in percentage (optional)
-    
-    Returns:
-        Posterior expected returns and covariance
-    """
-    n = len(w_strategic)
+    n = len(w_market)
     rf_decimal = rf_percent / 100
     Sigma_decimal = Sigma_percent_sq / 10000  # Convert from %-squared to decimal
 
     # 1. Reverse engineer equilibrium returns (in decimal)
     market_premium_decimal = 0.06
-    var_strategic_decimal = w_strategic @ Sigma_decimal @ w_strategic
-    lambda_risk = market_premium_decimal / var_strategic_decimal
-    Pi = lambda_risk * (Sigma_decimal @ w_strategic)  # Decimal excess returns
+    var_market_decimal = w_market @ Sigma_decimal @ w_market
+    lambda_risk = market_premium_decimal / var_market_decimal
+    Pi = lambda_risk * (Sigma_decimal @ w_market)  # Decimal excess returns
 
     # Calculate Pi total returns for returning later
     Pi_total_percent = (Pi + rf_decimal) * 100
@@ -217,56 +120,95 @@ def black_litterman(Sigma_percent_sq, w_strategic, rf_percent, tau=0.025, P=None
     return Pi_total_percent, Sigma_percent_sq, Pi_total_percent
 
 
+def calculate_returns(prices, frequency='weekly'):
+    """Calculate arithmetic returns at specified frequency"""
+    if frequency == 'weekly':
+        resample_rule = 'W-FRI'  # Use Friday to ensure consistency
+        prices_resampled = prices.resample(resample_rule).last()
+    elif frequency == 'monthly':
+        resample_rule = 'M'
+        prices_resampled = prices.resample(resample_rule).last()
+    else:  # Daily
+        prices_resampled = prices
+
+    returns = prices_resampled.pct_change().dropna()
+    return returns
+
+
+def calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate_percent, method='equilibrium'):
+    """
+    Calculate expected returns. Equilibrium method is now theoretically sound.
+    Returns values are in annual percentage.
+    """
+    periods_per_year = 52 if st.session_state.frequency == 'weekly' else 12
+
+    if method == 'historical':
+        # Historical average - simple but unstable
+        mu = returns.mean() * periods_per_year * 100
+        return mu
+
+    elif method == 'equilibrium':
+        # Market-implied equilibrium returns (from Black-Litterman)
+        # All calculations must be in decimal form
+        market_risk_premium_decimal = 0.06  # Assumed historical equity risk premium (6%)
+        rf_decimal = rf_rate_percent / 100
+
+        # Calculate market variance in decimal
+        var_market_decimal = w_market @ Sigma_decimal @ w_market
+        if var_market_decimal == 0:
+            st.error("Market variance is zero. Cannot calculate equilibrium returns.")
+            return pd.Series([rf_rate_percent] * len(returns.columns), index=returns.columns)
+
+        # Implied risk aversion parameter (lambda or delta)
+        lambda_risk = market_risk_premium_decimal / var_market_decimal
+
+        # Implied equilibrium excess returns (Pi vector) in decimal
+        Pi_decimal = lambda_risk * (Sigma_decimal @ w_market)
+
+        # Add risk-free rate to get total expected returns
+        mu_decimal_total = Pi_decimal + rf_decimal
+
+        # Return as annualized percentage
+        return pd.Series(mu_decimal_total, index=returns.columns) * 100
+
+    # Fallback to historical if method is not recognized
+    return returns.mean() * periods_per_year * 100
+
+
 def optimize_portfolio(mu, Sigma, rf, allow_short=False):
     """Optimize portfolio for maximum Sharpe ratio (Tangency Portfolio)"""
     n = len(mu)
-    rf_decimal = rf / 100
-    
-    # Objective function: minimize negative Sharpe ratio
+    rf_decimal = rf / 100  # Ensure RF rate is in decimal for calculation
+
+    # Objective function: minimize the negative Sharpe ratio
     def neg_sharpe(w):
-        # DON'T renormalize here - constraint handles it
-        port_return_decimal = (w @ mu) / 100
+        # Ensure weights sum to 1 to avoid division by zero issues
+        w = w / np.sum(w)
+        port_return_decimal = w @ mu / 100
         port_vol_decimal = np.sqrt(w @ Sigma @ w) / 100
         if port_vol_decimal == 0:
-            return 1e9
-        sharpe = (port_return_decimal - rf_decimal) / port_vol_decimal
-        return -sharpe
+            return 1e9 # Return a large number if volatility is zero
+        return -(port_return_decimal - rf_decimal) / port_vol_decimal
     
     # Constraints and bounds
     constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1}]
     bounds = tuple((0, 1) for _ in range(n)) if not allow_short else None
     
-    # Multiple starting points to avoid local minima
-    best_result = None
-    best_sharpe = -np.inf
+    w0 = np.array([1/n] * n) # Initial guess: equal weights
     
-    for _ in range(5):  # Try 5 different starting points
-        w0 = np.random.dirichlet(np.ones(n))  # Random weights that sum to 1
-        
-        result = minimize(neg_sharpe, w0, method='SLSQP', bounds=bounds, 
-                         constraints=constraints, options={'ftol': 1e-9})
-        
-        if result.success:
-            weights = result.x
-            port_return = (weights @ mu)
-            port_vol = np.sqrt(weights @ Sigma @ weights)
-            sharpe = (port_return - rf) / port_vol if port_vol > 0 else 0
-            
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_result = {'weights': weights, 'return': port_return, 
-                              'volatility': port_vol, 'sharpe': sharpe}
+    result = minimize(neg_sharpe, w0, method='SLSQP', bounds=bounds, constraints=constraints)
     
-    if best_result is None:
-        st.error("Optimization failed with all starting points")
+    if result.success:
+        weights = result.x
+        # Recalculate portfolio stats based on final weights in percentage terms
+        port_return = weights @ mu
+        port_vol = np.sqrt(weights @ Sigma @ weights)
+        sharpe = (port_return - rf) / port_vol if port_vol > 0 else 0
+        
+        return {'weights': weights, 'return': port_return, 'volatility': port_vol, 'sharpe': sharpe}
+    else:
+        st.error(f"Optimization failed: {result.message}")
         return None
-        
-    # Validation
-    weight_std = np.std(best_result['weights'])
-    if weight_std < 0.01:
-        st.warning(f"⚠️ Optimization produced nearly equal weights (std={weight_std:.4f}). Expected returns may be too similar.")
-    
-    return best_result
 
 def allocate_risky_riskfree(optimal_portfolio, rf_percent, risk_aversion):
     """Determine allocation between the optimal risky portfolio and the risk-free asset"""
@@ -337,46 +279,19 @@ with st.sidebar:
     st.markdown("---")
     returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0)
     
-    # Strategic weights input (only for equilibrium method)
-    custom_weights_dict = {}
-    if returns_method == "equilibrium":
-        use_custom_weights = st.checkbox("📊 Define Custom Strategic Weights", 
-                                         help="Optional: Define your neutral portfolio allocation")
-        if use_custom_weights:
-            st.markdown("**Strategic Weights (% allocation)**")
-            st.caption("Define your 'neutral' portfolio. These weights are used as the starting point for equilibrium calculation.")
-            
-            weights_input = st.text_area(
-                "Enter weights (TICKER WEIGHT format, one per line)",
-                "SPY 40\nAGG 30\nGLD 20\nMCHI 10",
-                height=100,
-                help="Example: SPY 40 means 40% strategic weight to SPY"
-            )
-            
-            # Parse custom weights
-            for line in weights_input.split('\n'):
-                parts = line.strip().split()
-                if len(parts) == 2:
-                    ticker, weight = parts[0].upper(), float(parts[1])
-                    custom_weights_dict[ticker] = weight
-    
     if returns_method == "equilibrium": 
         st.info("✅ **Using Equilibrium Returns (Black-Litterman)**")
         with st.expander("ℹ️ What does this mean?"):
             st.markdown("""
             **Equilibrium returns** are calculated using reverse optimization:
-            - Starts from a "neutral" portfolio (equal weights or your custom allocation)
+            - Assumes current market weights represent equilibrium
             - Uses 6% equity risk premium (historical average)
             - More stable than historical means
             - Forward-looking, not influenced by recent performance
             
-            **Theory**: Π = λ × Σ × w_strategic, where λ = risk_premium / portfolio_variance
+            **Theory**: Π = λ × Σ × w_market, where λ = risk_premium / market_variance
             
             **Result**: Conservative, theoretically-grounded expected returns
-            
-            **Note**: We use strategic weights (equal or custom), NOT market cap, because:
-            - We're usually selecting ETFs/assets to hold
-            - ETF market cap doesn't represent asset class importance
             """)
     else: 
         st.warning("⚠️ **Using Historical Average Returns**")
@@ -417,10 +332,81 @@ if optimize_button:
             Sigma_percent_sq = returns.cov() * periods_per_year * 10000
             Sigma_decimal = Sigma_percent_sq.values / 10000
 
-            # Get strategic weights (equal or custom, no market cap needed!)
-            w_strategic, tickers = get_strategic_weights(tickers, custom_weights_dict if returns_method == 'equilibrium' else None)
+            with st.spinner("Fetching market capitalization / asset-size data..."):
+                market_caps, failed_tickers = get_market_cap_weights(tickers)
 
-            mu = calculate_expected_returns(returns, Sigma_decimal, w_strategic, rf_rate, returns_method)
+            # Provide manual override inputs in the sidebar for any failed tickers
+            overrides = {}
+            if failed_tickers:
+                # Initialize session storage for overrides if not present
+                if 'overrides' not in st.session_state:
+                    st.session_state['overrides'] = {}
+
+                with st.sidebar.expander("Manual size overrides for missing tickers", expanded=True):
+                    st.markdown("If any tickers failed to fetch sizes, enter manual sizes below. Leave 0 to skip.")
+                    unit = st.selectbox("Unit for manual overrides", ("Billion", "Million"), index=0)
+                    mult = 1e9 if unit == "Billion" else 1e6
+                    for t in failed_tickers:
+                        key = f"override_{t}"
+                        # Prefill from session state if present
+                        pre = st.session_state['overrides'].get(t, 0.0) / mult if st.session_state['overrides'].get(t, 0) else 0.0
+                        val = st.number_input(f"{t} size ({unit})", min_value=0.0, value=float(pre), step=0.1, format="%.3f", key=key)
+                        if val and val > 0:
+                            overrides[t] = float(val) * mult
+                            # Persist to session state
+                            st.session_state['overrides'][t] = float(val) * mult
+
+
+            # Merge fetched sizes with overrides (overrides take precedence)
+            merged_sizes = dict(market_caps) if market_caps else {}
+            for t, v in overrides.items():
+                merged_sizes[t] = v
+
+            # Determine missing tickers after overrides
+            missing_after = [t for t in tickers if t not in merged_sizes]
+
+            # Build a display table with source info
+            def fmt_size(v):
+                if v is None:
+                    return "N/A"
+                if abs(v) >= 1e9:
+                    return f"${v/1e9:.2f}B"
+                if abs(v) >= 1e6:
+                    return f"${v/1e6:.2f}M"
+                return f"${v:.0f}"
+
+            display_rows = []
+            for t in tickers:
+                if t in merged_sizes:
+                    src = 'Overridden' if t in overrides else 'Fetched'
+                    display_rows.append({'Ticker': t, 'Asset Size': fmt_size(merged_sizes[t]), 'Source': src})
+                else:
+                    display_rows.append({'Ticker': t, 'Asset Size': 'N/A', 'Source': 'Missing'})
+
+            with st.expander("📊 View Asset-Size Data & Weights", expanded=True):
+                df_display = pd.DataFrame(display_rows).set_index('Ticker')
+                # Highlight missing rows
+                def highlight_missing(s):
+                    return ['background-color: #ffcccc' if v == 'Missing' else '' for v in s]
+
+                st.dataframe(df_display.style.apply(highlight_missing, subset=['Source']), use_container_width=True)
+
+            # Compute final market weights if we have sizes for all tickers; otherwise fallback to equal weights
+            if len(missing_after) == 0 and len(merged_sizes) > 0:
+                total_cap = sum(merged_sizes[t] for t in tickers)
+                if total_cap <= 0:
+                    st.error("Fetched sizes sum to zero or negative. Falling back to equal weights.")
+                    w_market = np.array([1/len(tickers)] * len(tickers))
+                else:
+                    w_market = np.array([merged_sizes[t] / total_cap for t in tickers])
+                    st.success("✅ Using fetched and/or overridden sizes to compute market weights.")
+            else:
+                if missing_after:
+                    st.warning(f"⚠️ Size data missing for: {', '.join(missing_after)}. Using equal weights as fallback.")
+                    st.info("You can enter overrides for missing tickers in the sidebar expander titled 'Manual size overrides for missing tickers'.")
+                w_market = np.array([1/len(tickers)] * len(tickers))
+
+            mu = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, returns_method)
             
             if use_custom_views and views_text.strip():
                 views_lines = [line.strip() for line in views_text.split('\n') if line.strip()]
@@ -435,7 +421,7 @@ if optimize_button:
                         Q_list.append(float(parts[2]))
                 if P_list:
                     P, Q = np.array(P_list), np.array(Q_list)
-                    mu_bl, Sigma_bl, pi_eq = black_litterman(Sigma_percent_sq.values, w_strategic, rf_rate, P=P, Q_percent=Q)
+                    mu_bl, Sigma_bl, pi_eq = black_litterman(Sigma_percent_sq.values, w_market, rf_rate, P=P, Q_percent=Q)
                     mu = pd.Series(mu_bl, index=tickers)
                     Sigma_percent_sq = pd.DataFrame(Sigma_bl, index=tickers, columns=tickers)
                     st.success("✅ Black-Litterman model applied with your views.")
@@ -544,8 +530,8 @@ if optimize_button:
                     
                     # Show comparison of returns methods
                     st.markdown("### Expected Returns Comparison")
-                    mu_hist = calculate_expected_returns(returns, Sigma_decimal, w_strategic, rf_rate, method='historical')
-                    mu_eq = calculate_expected_returns(returns, Sigma_decimal, w_strategic, rf_rate, method='equilibrium')
+                    mu_hist = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, method='historical')
+                    mu_eq = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, method='equilibrium')
                     
                     comparison_df = pd.DataFrame({
                         'Historical': mu_hist,
@@ -609,4 +595,8 @@ else:
 
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational purposes only and does not constitute financial advice. Data is sourced from Yahoo Finance. Past performance is not indicative of future results.")
+
+# BSD 3-Clause License footer
+st.markdown("---")
+st.markdown("\n\n---\n\nCopyright (c) 2025, Omid Arhami. Licensed under the BSD 3-Clause License.")
 
