@@ -42,25 +42,55 @@ def download_data(tickers, start_date, end_date):
 
 @st.cache_data(ttl=3600)
 def get_market_cap_weights(tickers):
-    """Get market capitalization weights for tickers with error handling"""
+    """Get market capitalization weights with robust error handling"""
     market_caps = {}
-    valid_tickers = []
-    for ticker in tickers:
-        try:
-            info = yf.Ticker(ticker).info
-            mc = info.get('marketCap')
-            if mc:
-                market_caps[ticker] = mc
-                valid_tickers.append(ticker)
-        except Exception:
-            st.warning(f"Could not fetch market cap for {ticker}. It will be weighted equally.")
-            # Assign an average market cap to avoid errors, or handle as you see fit
-            market_caps[ticker] = np.mean(list(market_caps.values())) if market_caps else 1e10
-
-    total_cap = sum(market_caps[t] for t in valid_tickers)
-    weights = np.array([market_caps[t] / total_cap for t in valid_tickers])
+    failed_tickers = []
     
-    return weights, valid_tickers
+    with st.spinner("Fetching market capitalization data..."):
+        for ticker in tickers:
+            try:
+                info = yf.Ticker(ticker).info
+                mc = info.get('marketCap', None)
+                
+                if mc and mc > 0:
+                    market_caps[ticker] = mc
+                else:
+                    failed_tickers.append(ticker)
+            except Exception as e:
+                failed_tickers.append(ticker)
+    
+    # Handle failures
+    if len(failed_tickers) > 0:
+        st.warning(f"⚠️ Could not fetch market cap for: {', '.join(failed_tickers)}")
+        
+        # If we have no market caps at all, use equal weights
+        if len(market_caps) == 0:
+            st.error("❌ No market cap data available. Using equal weights for all tickers.")
+            st.info("💡 **Impact**: Equilibrium returns will be based on equal-weighted portfolio, not true market weights.")
+            return np.array([1/len(tickers)] * len(tickers)), tickers
+        
+        # If some failed, use equal weights for consistency
+        st.warning(f"⚠️ Using equal weights as fallback to maintain consistency.")
+        st.info("💡 **Impact**: This affects equilibrium returns calculation. Consider removing failed tickers or entering market caps manually.")
+        return np.array([1/len(tickers)] * len(tickers)), tickers
+    
+    # Calculate market cap weights for all tickers
+    total_cap = sum(market_caps.values())
+    weights = np.array([market_caps[ticker] / total_cap for ticker in tickers])
+    
+    # Display success and show weights
+    st.success(f"✅ Successfully fetched market caps for all {len(tickers)} tickers")
+    
+    # Show market cap weights in an expander
+    with st.expander("📊 View Market Capitalization Weights"):
+        weight_df = pd.DataFrame({
+            'Ticker': tickers,
+            'Market Cap': [f"${market_caps[t]/1e9:.1f}B" for t in tickers],
+            'Weight': weights * 100
+        }).sort_values('Weight', ascending=False)
+        st.dataframe(weight_df.style.format({'Weight': '{:.2f}%'}), use_container_width=True)
+    
+    return weights, tickers
 
 
 def calculate_returns(prices, frequency='weekly'):
@@ -263,9 +293,35 @@ with st.sidebar:
     rf_rate = st.number_input("Risk-Free Rate (Annual %)", 0.0, 10.0, 3.8, 0.1)
     risk_aversion = st.slider("Risk Aversion (λ)", 1.0, 15.0, 5.0, 0.5, help="Higher λ means more conservative. 2-4: Aggressive, 5-8: Moderate, 9+: Conservative")
     st.markdown("---")
-    returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0, help="Equilibrium (recommended) is more stable and forward-looking than simple historical averages.")
-    if returns_method == "equilibrium": st.info("✅ Using market-implied equilibrium returns.")
-    else: st.warning("⚠️ Historical means are often unstable and poor predictors of future returns.")
+    returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0)
+    
+    if returns_method == "equilibrium": 
+        st.info("✅ **Using Equilibrium Returns (Black-Litterman)**")
+        with st.expander("ℹ️ What does this mean?"):
+            st.markdown("""
+            **Equilibrium returns** are calculated using reverse optimization:
+            - Assumes current market weights represent equilibrium
+            - Uses 6% equity risk premium (historical average)
+            - More stable than historical means
+            - Forward-looking, not influenced by recent performance
+            
+            **Theory**: Π = λ × Σ × w_market, where λ = risk_premium / market_variance
+            
+            **Result**: Conservative, theoretically-grounded expected returns
+            """)
+    else: 
+        st.warning("⚠️ **Using Historical Average Returns**")
+        with st.expander("ℹ️ Limitations of historical returns"):
+            st.markdown("""
+            **Historical means** simply extrapolate past performance:
+            - Highly sensitive to the time period chosen
+            - High estimation error (standard error often exceeds mean)
+            - Assumes future = past (no mean reversion)
+            - Can lead to extreme, concentrated portfolios
+            
+            **Academic view**: Historical means are poor predictors of future returns
+            (see Merton 1980, Michaud 1989)
+            """)
     st.markdown("---")
     use_custom_views = st.checkbox("Add Custom Black-Litterman Views")
     if use_custom_views:
@@ -324,6 +380,31 @@ if optimize_button:
                 allocation = allocate_risky_riskfree(opt_result, rf_rate, risk_aversion)
                 risk_metrics = calculate_risk_metrics(returns, opt_result['weights'])
                 st.success("✅ Optimization Complete!")
+                
+                # --- DIAGNOSTIC INFO ---
+                with st.expander("🔍 Optimization Process Details"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**Step 1: Optimal Risky Portfolio (Tangency)**")
+                        st.write(f"Expected Return: {opt_result['return']:.2f}%")
+                        st.write(f"Volatility: {opt_result['volatility']:.2f}%")
+                        st.write(f"Sharpe Ratio: {opt_result['sharpe']:.3f}")
+                    with col2:
+                        st.markdown("**Step 2: Risk-Free Asset Allocation**")
+                        st.write(f"Risk Aversion (λ): {risk_aversion}")
+                        st.write(f"Optimal Risky %: {allocation['alpha']*100:.1f}%")
+                        st.write(f"Risk-Free %: {(1-allocation['alpha'])*100:.1f}%")
+                    
+                    st.markdown("**Formula Used**: α* = (E[R_p] - R_f) / (λ × σ²_p)")
+                    
+                    # Show the calculation
+                    alpha_calc = (opt_result['return']/100 - rf_rate/100) / (risk_aversion * (opt_result['volatility']/100)**2)
+                    st.write(f"Calculated α* = ({opt_result['return']:.2f}% - {rf_rate}%) / ({risk_aversion} × {opt_result['volatility']:.2f}%²)")
+                    st.write(f"= {opt_result['return']/100 - rf_rate/100:.4f} / {risk_aversion * (opt_result['volatility']/100)**2:.6f} = {alpha_calc:.3f}")
+                    if alpha_calc > 1:
+                        st.info(f"📊 Calculated α* = {alpha_calc:.3f} was clipped to 1.0 (no leverage constraint)")
+                    elif alpha_calc < 0:
+                        st.info(f"📊 Calculated α* = {alpha_calc:.3f} was clipped to 0.0 (no shorting constraint)")
                 
                 # --- RESULTS ---
                 col1, col2, col3, col4 = st.columns(4)
@@ -394,6 +475,7 @@ if optimize_button:
                 
                 with tab4:
                     st.subheader("Model Inputs & Outputs")
+
                     col1, col2 = st.columns(2)
                     with col1:
                         st.markdown("**Expected Returns (Annual %)**")
