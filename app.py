@@ -268,7 +268,7 @@ with st.sidebar:
     # Tickers
     tickers_input = st.text_area(
         "Stock Tickers (one per line)",
-        value="SPY\nTLT\nGLD\nVNQ\nEFA",
+        value="SPY\nVTI\nGLD\nSFY\nCIBR\nMCHI\nNVDA\nAVGO\nAMZN\nGOOG",
         height=150
     )
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
