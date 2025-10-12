@@ -274,7 +274,7 @@ with st.sidebar:
     end_date = datetime.now()
     start_date = end_date - timedelta(days=years_back * 365.25)
     st.markdown("---")
-    rf_rate = st.number_input("Risk-Free Rate (Annual %)", 0.0, 10.0, 3.8, 0.1)
+    rf_rate = st.number_input("Risk-Free Rate (Annual %)", 0.0, 10.0, 3.0, 0.1)
     risk_aversion = st.slider("Risk Aversion (λ)", 1.0, 15.0, 5.0, 0.5, help="Higher λ means more conservative. 2-4: Aggressive, 5-8: Moderate, 9+: Conservative")
     st.markdown("---")
     returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0)
@@ -308,9 +308,17 @@ with st.sidebar:
             """)
     st.markdown("---")
     use_custom_views = st.checkbox("Add Custom Black-Litterman Views")
+    # Persist views in session state so they survive reruns
+    if 'views_text' not in st.session_state:
+        st.session_state['views_text'] = "GLD SPY 0.5\nGLD VTI 0.5"
+
     if use_custom_views:
-        st.markdown("**Your Views (e.g., 'SPY outperforms AGG by 2.5%')**")
-        views_text = st.text_area("Views (one per line: TICKER1 TICKER2 VALUE)", "SPY AGG 2.5", height=100)
+        st.markdown("**Your Views (e.g., 'GLD outperforms SPY by 0.5%')**")
+        # Use session state value as default and update it when the user edits
+        views_text = st.text_area("Views (one per line: TICKER1 TICKER2 VALUE)", value=st.session_state['views_text'], height=100, key='views_text')
+    else:
+        # Keep views_text in namespace for later checks; do not overwrite session value
+        views_text = st.session_state.get('views_text', "GLD SPY 0.5\nGLD VTI 0.5")
     st.markdown("---")
     optimize_button = st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True)
 
@@ -383,7 +391,7 @@ if optimize_button:
                 else:
                     display_rows.append({'Ticker': t, 'Asset Size': 'N/A', 'Source': 'Missing'})
 
-            with st.expander("📊 View Asset-Size Data & Weights", expanded=True):
+            with st.expander("📊 View Asset-Size Data & Weights", expanded=False):
                 df_display = pd.DataFrame(display_rows).set_index('Ticker')
                 # Highlight missing rows
                 def highlight_missing(s):
@@ -596,7 +604,6 @@ else:
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational purposes only and does not constitute financial advice. Data is sourced from Yahoo Finance. Past performance is not indicative of future results.")
 
-# BSD 3-Clause License footer
-st.markdown("---")
-st.markdown("\n\n---\n\nCopyright (c) 2025, Omid Arhami. Licensed under the BSD 3-Clause License.")
+# BSD 3-Clause License footer (single block)
+st.markdown("Copyright (c) 2025, Omid Arhami. Licensed under the BSD 3-Clause License.")
 
