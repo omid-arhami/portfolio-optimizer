@@ -275,21 +275,22 @@ with st.sidebar:
     start_date = end_date - timedelta(days=years_back * 365.25)
     st.markdown("---")
     rf_rate = st.number_input("Risk-Free Rate (Annual %)", 0.0, 10.0, 3.0, 0.1)
-    risk_aversion = st.slider("Risk Aversion (λ)", 1.0, 15.0, 5.0, 0.5, help="Higher λ means more conservative. 2-4: Aggressive, 5-8: Moderate, 9+: Conservative")
+    risk_aversion = st.slider("Risk Aversion (RA)", 1.0, 15.0, 5.0, 0.5, help="Higher RA means more conservative. 2-4: Aggressive, 4-6: Moderate, 6-10: Conservative, 10+: Very Conservative")
     st.markdown("---")
     returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0)
     
     if returns_method == "equilibrium": 
-        st.info("✅ **Using Equilibrium Returns (Black-Litterman)**")
+        st.info("✅ **Using Equilibrium Returns (Reverse Optimization)**")
         with st.expander("ℹ️ What does this mean?"):
             st.markdown("""
-            **Equilibrium returns** are calculated using reverse optimization:
+            **Equilibrium returns** are calculated using reverse optimization from CAPM:
             - Assumes current market weights represent equilibrium
-            - Uses 6% equity risk premium (historical average)
+            - Uses 10% equity risk premium (historical average)
+            - Formula: Π = λ × Σ × wₘ (where λ is market risk aversion)
             - More stable than historical means
             - Forward-looking, not influenced by recent performance
             
-            **Theory**: Π = λ × Σ × w_market, where λ = risk_premium / market_variance
+            **Important**: This is NOT the same as Black-Litterman, which is an optional add-on.
             
             **Result**: Conservative, theoretically-grounded expected returns
             """)
@@ -451,11 +452,11 @@ if optimize_button:
                         st.write(f"Sharpe Ratio: {opt_result['sharpe']:.3f}")
                     with col2:
                         st.markdown("**Step 2: Risk-Free Asset Allocation**")
-                        st.write(f"Risk Aversion (λ): {risk_aversion}")
+                        st.write(f"Risk Aversion (RA): {risk_aversion}")
                         st.write(f"Optimal Risky %: {allocation['alpha']*100:.1f}%")
                         st.write(f"Risk-Free %: {(1-allocation['alpha'])*100:.1f}%")
                     
-                    st.markdown("**Formula Used**: α* = (E[R_p] - R_f) / (λ × σ²_p)")
+                    st.markdown("**Formula Used**: α* = (E[R_p] - R_f) / (RA × σ²_p)")
                     
                     # Show the calculation
                     alpha_calc = (opt_result['return']/100 - rf_rate/100) / (risk_aversion * (opt_result['volatility']/100)**2)
@@ -592,13 +593,89 @@ else:
     st.markdown("---")
     st.markdown("### How this Optimizer Works")
     st.markdown("""
-    This tool finds the mathematically optimal way to allocate your wealth between a portfolio of risky assets (like stocks and ETFs) and a risk-free asset (like a savings account). Here’s the process:
-
-    1.  **Data Collection**: It downloads historical price data for your chosen tickers from Yahoo Finance.
-    2.  **Risk & Correlation**: It calculates the volatility (risk) of each asset and how they move in relation to one another (correlation).
-    3.  **Expected Returns**: Instead of relying on noisy historical averages, it uses the **Black-Litterman model's** concept of *equilibrium returns*. This estimates the returns that the global market is implicitly expecting, creating a much more stable and logical starting point.
-    4.  **Finding the Best Risky Portfolio**: Using Modern Portfolio Theory, it identifies the single "tangency portfolio" – the combination of your risky assets with the highest possible reward for the amount of risk taken (i.e., the highest Sharpe Ratio).
-    5.  **Personalized Allocation**: Finally, it determines the ideal split between that best risky portfolio and the risk-free asset based on your personal **risk aversion**. A more conservative investor will hold more in the risk-free asset, while an aggressive one will hold more in the risky portfolio.
+    This tool implements Modern Portfolio Theory and Capital Allocation Theory to find the mathematically optimal way to allocate capital between risky assets (stocks, ETFs) and a risk-free asset (Treasury bills).
+    """)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("#### 🎯 Key Features")
+        st.markdown("""
+        - Modern Portfolio Theory (MPT)
+        - Equilibrium Returns (Default)
+        - Black-Litterman Model (Optional)
+        - Capital Allocation Line (CAL)
+        - Risk-Free Asset Optimization
+        - Downside Risk Metrics (VaR, CVaR, MDD)
+        - Interactive Visualizations
+        - Market-Cap Weighted Portfolios
+        """)
+    
+    with col2:
+        st.markdown("#### 💡 How It Works")
+        st.markdown("""
+        1. Download & analyze historical price data
+        2. Calculate covariance matrix (risk structure)
+        3. Determine expected returns via equilibrium
+        4. Find tangency portfolio (max Sharpe Ratio)
+        5. Optimize allocation based on risk aversion (RA)
+        6. Calculate comprehensive risk metrics
+        7. Visualize results on efficient frontier
+        """)
+    
+    with col3:
+        st.markdown("#### 📊 Risk Aversion (RA) Guide")
+        st.markdown("""
+        - **RA = 1-2**: Very Aggressive
+        - **RA = 2-4**: Aggressive  
+        - **RA = 4-6**: Moderate
+        - **RA = 6-10**: Conservative
+        - **RA = 10+**: Very Conservative
+        
+        *Higher RA → More risk-free asset*
+        """)
+    
+    st.markdown("---")
+    
+    st.markdown("### 📚 The Two-Stage Framework")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### Stage 1: Universal Optimal Risky Mix")
+        st.markdown("""
+        Same for **all investors**, based on:
+        - Expected returns (equilibrium or equilibrium + views)
+        - Risk structure (covariance matrix)
+        - Risk-free rate
+        
+        **Output**: The **tangency portfolio** (maximum Sharpe Ratio) — the single best combination of risky assets.
+        """)
+    
+    with col2:
+        st.markdown("#### Stage 2: Personalized Risk Exposure")
+        st.markdown("""
+        Unique to **each investor**, based on:
+        - Personal risk aversion (RA)
+        - Characteristics of the tangency portfolio
+        
+        **Output**: Optimal allocation **α*** = (E[Rₚ] - Rғ) / (RA × σₚ²) between risky portfolio and risk-free asset.
+        """)
+    
+    st.markdown("---")
+    
+    st.markdown("### 🔬 Why Equilibrium Returns?")
+    st.markdown("""
+    The optimizer defaults to **equilibrium returns** (via reverse optimization) instead of historical averages because:
+    
+    - **Forward-looking**: Incorporates current market prices rather than extrapolating past performance
+    - **Stable**: Doesn't change drastically with different time periods
+    - **Theoretically grounded**: Based on CAPM equilibrium — assumes current market weights are optimal
+    - **Less prone to extreme allocations**: Historical means often lead to concentrated portfolios
+    
+    **The formula**: Π = λ × Σ × wₘ, where λ is the market risk aversion coefficient (distinct from your personal RA), Σ is the covariance matrix, and wₘ are market-cap weights.
+    
+    Academic research (Merton 1980, Michaud 1989) shows historical means have high estimation error and are poor predictors of future returns.
     """)
 
 st.markdown("---")
