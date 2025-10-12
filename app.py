@@ -87,7 +87,7 @@ def black_litterman(Sigma_percent_sq, w_market, rf_percent, tau=0.025, P=None, Q
     Sigma_decimal = Sigma_percent_sq / 10000  # Convert from %-squared to decimal
 
     # 1. Reverse engineer equilibrium returns (in decimal)
-    market_premium_decimal = 0.06
+    market_premium_decimal = 0.10
     var_market_decimal = w_market @ Sigma_decimal @ w_market
     lambda_risk = market_premium_decimal / var_market_decimal
     Pi = lambda_risk * (Sigma_decimal @ w_market)  # Decimal excess returns
@@ -150,7 +150,7 @@ def calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate_percent
     elif method == 'equilibrium':
         # Market-implied equilibrium returns (from Black-Litterman)
         # All calculations must be in decimal form
-        market_risk_premium_decimal = 0.06  # Assumed historical equity risk premium (6%)
+        market_risk_premium_decimal = 0.10  # Assumed historical equity risk premium (10%)
         rf_decimal = rf_rate_percent / 100
 
         # Calculate market variance in decimal
