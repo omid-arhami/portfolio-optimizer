@@ -317,6 +317,14 @@ with st.sidebar:
         st.markdown("**Your Views (e.g., 'GLD outperforms SPY by 0.5%')**")
         # Use session state value as default and update it when the user edits
         views_text = st.text_area("Views (one per line: TICKER1 TICKER2 VALUE)", value=st.session_state['views_text'], height=100, key='views_text')
+        # Friendly examples / help for wildcard usage
+        st.markdown("**Quick examples & wildcard ('*') usage:**")
+        st.markdown("- Format: `ASSET1 ASSET2 VALUE` (one view per line). VALUE is in percent, e.g. `0.5` for 0.5%.)")
+        st.markdown("- Use `*` as a wildcard for 'every other ticker' in the current asset list:")
+        st.markdown("  - `SPY * 1` expands to `SPY VTI 1`, `SPY GLD 1`, `SPY SFY 1`, ... (SPY vs every other ticker)")
+        st.markdown("  - `* SPY 1` expands to `VTI SPY 1`, `GLD SPY 1`, `SFY SPY 1`, ... (every ticker vs SPY)")
+        st.markdown("- Regular views (no `*`) work as before: `GLD SPY 0.5` means GLD - SPY = 0.5%.")
+        st.caption("Notes: self-referential views (e.g., `SPY SPY 1`) are ignored; malformed lines are skipped with a warning.")
     else:
         # Keep views_text in namespace for later checks; do not overwrite session value
         views_text = st.session_state.get('views_text', "GLD SPY 0.5\nGLD VTI 0.5")
@@ -422,12 +430,67 @@ if optimize_button:
                 P_list, Q_list = [], []
                 for view in views_lines:
                     parts = view.split()
-                    if len(parts) == 3 and parts[0] in tickers and parts[1] in tickers:
+                    # Expect exactly: ASSET1 ASSET2 VALUE
+                    if len(parts) != 3:
+                        st.warning(f"Skipping malformed view (expect 3 fields): '{view}'")
+                        continue
+
+                    a, b, val = parts[0].upper(), parts[1].upper(), parts[2]
+
+                    # Reject views where both sides are '*'
+                    if a == '*' and b == '*':
+                        st.warning(f"Skipping view with both sides '*' (ambiguous): '{view}'")
+                        continue
+
+                    # Try to parse numeric value
+                    try:
+                        q_value = float(val)
+                    except Exception:
+                        st.warning(f"Skipping view with invalid numeric value: '{view}'")
+                        continue
+
+                    # Helper to append a single view given two valid tickers
+                    def append_view(t1, t2, q):
+                        if t1 not in tickers or t2 not in tickers:
+                            return
+                        if t1 == t2:
+                            # skip self-referential views
+                            return
                         p_row = np.zeros(len(tickers))
-                        p_row[tickers.index(parts[0])] = 1
-                        p_row[tickers.index(parts[1])] = -1
+                        p_row[tickers.index(t1)] = 1
+                        p_row[tickers.index(t2)] = -1
                         P_list.append(p_row)
-                        Q_list.append(float(parts[2]))
+                        Q_list.append(q)
+
+                    # Expand when one side is '*'
+                    if a == '*':
+                        # a = every ticker except b
+                        if b not in tickers:
+                            st.warning(f"Ticker '{b}' in view not in current asset list: '{view}'")
+                            continue
+                        for t in tickers:
+                            if t == b:
+                                continue
+                            append_view(t, b, q_value)
+                        continue
+
+                    if b == '*':
+                        # b = every ticker except a
+                        if a not in tickers:
+                            st.warning(f"Ticker '{a}' in view not in current asset list: '{view}'")
+                            continue
+                        for t in tickers:
+                            if t == a:
+                                continue
+                            append_view(a, t, q_value)
+                        continue
+
+                    # No wildcard: both must be valid tickers
+                    if a in tickers and b in tickers:
+                        append_view(a, b, q_value)
+                    else:
+                        missing = [x for x in (a, b) if x not in tickers]
+                        st.warning(f"Skipping view because these tickers are not in the asset list: {', '.join(missing)}")
                 if P_list:
                     P, Q = np.array(P_list), np.array(Q_list)
                     mu_bl, Sigma_bl, pi_eq = black_litterman(Sigma_percent_sq.values, w_market, rf_rate, P=P, Q_percent=Q)
@@ -591,92 +654,59 @@ if optimize_button:
 else:
     st.info("👈 **Configure your portfolio in the sidebar and click 'Optimize Portfolio' to begin!**")
     st.markdown("---")
-    st.markdown("### How this Optimizer Works")
-    st.markdown("""
-    This tool implements Modern Portfolio Theory and Capital Allocation Theory to find the mathematically optimal way to allocate capital between risky assets (stocks, ETFs) and a risk-free asset (Treasury bills).
-    """)
+    st.markdown("### 🚀 Quick Start Guide")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("#### 🎯 Key Features")
+        st.markdown("#### 1️⃣ Configure Assets")
         st.markdown("""
-        - Modern Portfolio Theory (MPT)
-        - Equilibrium Returns (Default)
-        - Black-Litterman Model (Optional)
-        - Capital Allocation Line (CAL)
-        - Risk-Free Asset Optimization
-        - Downside Risk Metrics (VaR, CVaR, MDD)
-        - Interactive Visualizations
-        - Market-Cap Weighted Portfolios
+        - Enter stock/ETF tickers (one per line)
+        - Select data history (1-10 years)
+        - Choose frequency (weekly/monthly)
         """)
     
     with col2:
-        st.markdown("#### 💡 How It Works")
+        st.markdown("#### 2️⃣ Set Preferences")
         st.markdown("""
-        1. Download & analyze historical price data
-        2. Calculate covariance matrix (risk structure)
-        3. Determine expected returns via equilibrium
-        4. Find tangency portfolio (max Sharpe Ratio)
-        5. Optimize allocation based on risk aversion (RA)
-        6. Calculate comprehensive risk metrics
-        7. Visualize results on efficient frontier
+        - Enter risk-free rate (e.g., T-bill rate)
+        - Adjust risk aversion (RA):
+          - **RA = 2-4**: Aggressive
+          - **RA = 4-6**: Moderate  
+          - **RA = 6-10**: Conservative
         """)
     
     with col3:
-        st.markdown("#### 📊 Risk Aversion (RA) Guide")
+        st.markdown("#### 3️⃣ Optional Settings")
         st.markdown("""
-        - **RA = 1-2**: Very Aggressive
-        - **RA = 2-4**: Aggressive  
-        - **RA = 4-6**: Moderate
-        - **RA = 6-10**: Conservative
-        - **RA = 10+**: Very Conservative
-        
-        *Higher RA → More risk-free asset*
+        - Choose returns method (default: equilibrium)
+        - Add custom views for Black-Litterman
+        - Click **Optimize Portfolio** button
         """)
     
     st.markdown("---")
-    
-    st.markdown("### 📚 The Two-Stage Framework")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("#### Stage 1: Universal Optimal Risky Mix")
+        st.markdown("### 🎯 What You'll Get")
         st.markdown("""
-        Same for **all investors**, based on:
-        - Expected returns (equilibrium or equilibrium + views)
-        - Risk structure (covariance matrix)
-        - Risk-free rate
-        
-        **Output**: The **tangency portfolio** (maximum Sharpe Ratio) — the single best combination of risky assets.
+        - **Optimal portfolio weights** for each asset
+        - **Risk-free allocation** tailored to your RA
+        - **Expected return & volatility** metrics
+        - **Efficient frontier** visualization
+        - **Downside risk analysis** (VaR, CVaR, Max Drawdown)
         """)
     
     with col2:
-        st.markdown("#### Stage 2: Personalized Risk Exposure")
+        st.markdown("### 💡 Understanding the Results")
         st.markdown("""
-        Unique to **each investor**, based on:
-        - Personal risk aversion (RA)
-        - Characteristics of the tangency portfolio
+        The optimizer finds the best mix of risky assets (**tangency portfolio**), then determines how much to allocate between this portfolio and risk-free assets based on your personal risk aversion (RA).
         
-        **Output**: Optimal allocation **α*** = (E[Rₚ] - Rғ) / (RA × σₚ²) between risky portfolio and risk-free asset.
+        **Formula**: α* = (E[Rₚ] - Rғ) / (RA × σₚ²)
+        
+        Higher RA → More conservative → More risk-free asset
         """)
-    
-    st.markdown("---")
-    
-    st.markdown("### 🔬 Why Equilibrium Returns?")
-    st.markdown("""
-    The optimizer defaults to **equilibrium returns** (via reverse optimization) instead of historical averages because:
-    
-    - **Forward-looking**: Incorporates current market prices rather than extrapolating past performance
-    - **Stable**: Doesn't change drastically with different time periods
-    - **Theoretically grounded**: Based on CAPM equilibrium — assumes current market weights are optimal
-    - **Less prone to extreme allocations**: Historical means often lead to concentrated portfolios
-    
-    **The formula**: Π = λ × Σ × wₘ, where λ is the market risk aversion coefficient (distinct from your personal RA), Σ is the covariance matrix, and wₘ are market-cap weights.
-    
-    Academic research (Merton 1980, Michaud 1989) shows historical means have high estimation error and are poor predictors of future returns.
-    """)
 
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational purposes only and does not constitute financial advice. Data is sourced from Yahoo Finance. Past performance is not indicative of future results.")
