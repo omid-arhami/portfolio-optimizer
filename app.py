@@ -266,7 +266,7 @@ if 'frequency' not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-    tickers_input = st.text_area("Asset Tickers (one per line)", "SPY\nGLD\nCIBR\nMAGS\nNVDA\nAVGO\nAMZN", height=150)
+    tickers_input = st.text_area("Asset Tickers (one per line)", "SPY\nGLD\nCIBR\nMAGS", height=150)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
     st.markdown("---")
     col1, col2 = st.columns(2)
