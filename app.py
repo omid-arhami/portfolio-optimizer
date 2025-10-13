@@ -78,7 +78,7 @@ def get_market_cap_weights(tickers):
     # Return raw fetched sizes and list of failed tickers for UI handling
     return market_caps, failed_tickers
 
-def black_litterman(Sigma_percent_sq, w_market, rf_percent, tau=0.025, P=None, Q_percent=None):
+def black_litterman(Sigma_percent_sq, w_market, rf_percent, market_risk_premium, tau=0.025, P=None, Q_percent=None):
     """
     Black-Litterman model implementation.
     This function now correctly handles all unit conversions internally.
@@ -86,9 +86,9 @@ def black_litterman(Sigma_percent_sq, w_market, rf_percent, tau=0.025, P=None, Q
     n = len(w_market)
     rf_decimal = rf_percent / 100
     Sigma_decimal = Sigma_percent_sq / 10000  # Convert from %-squared to decimal
+    market_premium_decimal = market_risk_premium / 100  # Convert from % to decimal
 
     # 1. Reverse engineer equilibrium returns (in decimal)
-    market_premium_decimal = 0.10
     var_market_decimal = w_market @ Sigma_decimal @ w_market
     lambda_risk = market_premium_decimal / var_market_decimal
     Pi = lambda_risk * (Sigma_decimal @ w_market)  # Decimal excess returns
@@ -136,7 +136,7 @@ def calculate_returns(prices, frequency='weekly'):
     return returns
 
 
-def calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate_percent, method='equilibrium'):
+def calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate_percent, market_risk_premium, method='equilibrium'):
     """
     Calculate expected returns. Equilibrium method is now theoretically sound.
     Returns values are in annual percentage.
@@ -151,7 +151,7 @@ def calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate_percent
     elif method == 'equilibrium':
         # Market-implied equilibrium returns (from Black-Litterman)
         # All calculations must be in decimal form
-        market_risk_premium_decimal = 0.10  # Assumed historical equity risk premium (10%)
+        market_risk_premium_decimal = market_risk_premium / 100
         rf_decimal = rf_rate_percent / 100
 
         # Calculate market variance in decimal
@@ -253,6 +253,67 @@ def calculate_risk_metrics(returns, weights, confidence=0.95):
     
     return {'var_95': var * 100, 'cvar_95': cvar * 100, 'max_drawdown': max_drawdown * 100}
 
+def calculate_gap_views(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium,
+                       confidence=0.5, min_gap_threshold=1.0):
+    """
+    Calculate Black-Litterman views based on the gap between historical and equilibrium returns.
+    
+    This integrates historical momentum into equilibrium returns in a statistically principled way.
+    
+    Parameters:
+    - confidence: How much of the historical outperformance to incorporate (0-1)
+                 0.5 = "50% of past momentum will persist" (moderate/conservative)
+    - min_gap_threshold: Only create views for assets with gaps larger than this (in %)
+    
+    Returns: P matrix, Q vector, and gaps DataFrame for display
+    """
+    periods_per_year = 52 if st.session_state.frequency == 'weekly' else 12
+    
+    # Calculate both methods
+    mu_hist = calculate_expected_returns(returns, Sigma_decimal, w_market, 
+                                         rf_rate, market_risk_premium, method='historical')
+    mu_eq = calculate_expected_returns(returns, Sigma_decimal, w_market, 
+                                       rf_rate, market_risk_premium, method='equilibrium')
+    
+    # Calculate gaps (positive = historical > equilibrium, indicating momentum)
+    gaps = mu_hist - mu_eq
+    
+    # Sort by absolute gap magnitude
+    sorted_gaps = gaps.abs().sort_values(ascending=False)
+    
+    P_list, Q_list = [], []
+    
+    # Create views for assets with significant gaps
+    for ticker in sorted_gaps.index:
+        gap = gaps[ticker]
+        
+        if abs(gap) > min_gap_threshold:
+            # View: This asset will outperform/underperform the market-weighted portfolio
+            p_row = np.zeros(len(returns.columns))
+            p_row[returns.columns.tolist().index(ticker)] = 1
+            
+            # Subtract market weights from all other assets (creates view vs. market portfolio)
+            w_others = w_market.copy()
+            w_others[returns.columns.tolist().index(ticker)] = 0
+            if w_others.sum() > 0:  # Avoid division by zero
+                w_others = w_others / w_others.sum()  # Renormalize
+            
+            for i, t in enumerate(returns.columns):
+                if t != ticker:
+                    p_row[i] = -w_others[i]
+            
+            # View magnitude: confidence × gap
+            # E.g., if gap = 10% and confidence = 0.3, view = 3%
+            view_magnitude = confidence * gap
+            
+            P_list.append(p_row)
+            Q_list.append(view_magnitude)
+    
+    if len(P_list) == 0:
+        return None, None, gaps
+    
+    return np.array(P_list), np.array(Q_list), gaps
+
 # ============================================================================
 # STREAMLIT UI
 # ============================================================================
@@ -278,55 +339,117 @@ with st.sidebar:
     rf_rate = st.number_input("Risk-Free Rate (Annual %)", 0.0, 10.0, 3.0, 0.1)
     risk_aversion = st.slider("Risk Aversion (RA)", 1.0, 15.0, 5.0, 0.5, help="Higher RA means more conservative. 2-4: Aggressive, 4-6: Moderate, 6-10: Conservative, 10+: Very Conservative")
     st.markdown("---")
-    returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0)
+    returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0,
+        help="Equilibrium: Market-implied returns based on current prices and risk. Historical: Simple average of past returns.")
     
     if returns_method == "equilibrium": 
         st.info("✅ **Using Equilibrium Returns**")
         with st.expander("ℹ️ What does this mean?"):
             st.markdown("""
-            **Equilibrium returns** are calculated using reverse optimization from CAPM:
-            - Assumes current market weights represent equilibrium
-            - Uses 10% equity risk premium (historical average)
-            - Formula: Π = λ × Σ × wₘ (where λ is market risk aversion)
-            - More stable than historical means
-            - Forward-looking, not influenced by recent performance
+            **Equilibrium returns** represent market consensus expectations:
+            - Derived from current market prices and asset volatilities
+            - Assumes the market is in equilibrium (supply = demand)
+            - Uses reverse optimization from CAPM theory
+            - Formula: Π = λ × Σ × w_market (where λ = market risk aversion)
+            - More stable and forward-looking than historical averages
+            - Not biased by recent performance anomalies
                         
-            **Result**: Conservative, theoretically-grounded expected returns
+            **Advantage**: Theoretically grounded, less prone to estimation error
             """)
     else: 
         st.warning("⚠️ **Using Historical Average Returns**")
         with st.expander("ℹ️ Limitations of historical returns"):
             st.markdown("""
-            **Historical means** simply extrapolate past performance:
-            - Highly sensitive to the time period chosen
-            - High estimation error (standard error often exceeds mean)
-            - Assumes future = past (no mean reversion)
+            **Historical means** extrapolate past performance into the future:
+            - **High estimation error**: Standard error often exceeds the mean itself
+            - **Time period sensitivity**: Results change dramatically with different lookback periods
+            - **No mean reversion**: Assumes past outperformers will continue outperforming
+            - **Recency bias**: Overly influenced by recent trends
             - Can lead to extreme, concentrated portfolios
             
-            **Academic view**: Historical means are poor predictors of future returns
-            (see Merton 1980, Michaud 1989)
+            **Academic consensus**: Historical means are poor predictors of future returns (see Merton 1980, Michaud 1989).
             """)
+    
     st.markdown("---")
-    use_custom_views = st.checkbox("Add Custom Black-Litterman Views")
+    
+    # Historical Momentum Integration (Default ON at 30%)
+    use_momentum_views = st.checkbox("📈 Historical Momentum Integration", value=True,
+        help="Blend recent performance trends with equilibrium returns using Black-Litterman model")
+    
+    if use_momentum_views:
+        st.markdown("**Black-Litterman Settings**")
+        momentum_confidence = st.slider(
+            "Momentum Persistence (%)", 
+            0, 100, 30, 5,
+            help="How much of the historical outperformance do you expect to continue? 30% = moderate, 50% = balanced, 70% = aggressive"
+        ) / 100
+        
+        min_gap = st.slider(
+            "Minimum Significance (%)", 
+            0.5, 5.0, 1.0, 0.5,
+            help="Only incorporate momentum for assets that outperformed/underperformed by at least this amount"
+        )
+        
+        with st.expander("ℹ️ How Momentum Integration Works"):
+            st.markdown("""
+            This feature uses the **Black-Litterman model** to blend equilibrium returns with recent trends:
+            
+            1. **Calculate the gap**: Historical return - Equilibrium return
+            2. **Scale by confidence**: If Gold's gap is +10% and confidence is 50%, the view is +5%
+            3. **Bayesian blending**: The model statistically combines equilibrium with your momentum views
+            
+            **Example**: 
+            - Gold historical return: 15%
+            - Gold equilibrium return: 5%
+            - Gap: 10%
+            - With 50% confidence → Black-Litterman softly adjusts Gold's expected return upward by 5%
+            
+            **Why this works**:
+            - Momentum persists in the medium term (6-12 months) - empirical fact
+            - But it's not fully predictive - mean reversion also exists
+            - This approach balances both effects in a statistically principled way
+            """)
+    
+    st.markdown("---")
+    
+    # Manual custom views (optional, for advanced users)
+    use_custom_views = st.checkbox("Advanced: Add Manual Black-Litterman Views",
+        help="Specify your own views about relative performance (e.g., 'GLD SPY 2.5' means Gold will outperform SPY by 2.5%)")
+    
     # Persist views in session state so they survive reruns
     if 'views_text' not in st.session_state:
         st.session_state['views_text'] = "GLD SPY 0.5\nGLD VTI 0.5"
 
     if use_custom_views:
-        st.markdown("**Your Views (e.g., 'GLD outperforms SPY by 0.5%')**")
-        # Use session state value as default and update it when the user edits
-        views_text = st.text_area("Views (one per line: TICKER1 TICKER2 VALUE)", value=st.session_state['views_text'], height=100, key='views_text')
-        # Friendly examples / help for wildcard usage
-        st.markdown("**Quick examples & wildcard ('*') usage:**")
-        st.markdown("- Format: `ASSET1 ASSET2 VALUE` (one view per line). VALUE is in percent, e.g. `0.5` for 0.5%.)")
-        st.markdown("- Use `*` as a wildcard for 'every other ticker' in the current asset list:")
-        st.markdown("  - `SPY * 1` expands to `SPY VTI 1`, `SPY GLD 1`, `SPY SFY 1`, ... (SPY vs every other ticker)")
-        st.markdown("  - `* SPY 1` expands to `VTI SPY 1`, `GLD SPY 1`, `SFY SPY 1`, ... (every ticker vs SPY)")
-        st.markdown("- Regular views (no `*`) work as before: `GLD SPY 0.5` means GLD - SPY = 0.5%.")
-        st.caption("Notes: self-referential views (e.g., `SPY SPY 1`) are ignored; malformed lines are skipped with a warning.")
+        st.markdown("**Your Views (one per line: TICKER1 TICKER2 VALUE)**")
+        views_text = st.text_area("Format: ASSET1 ASSET2 OUTPERFORMANCE%", 
+            value=st.session_state['views_text'], height=100, key='views_text',
+            help="Example: 'GLD SPY 2.5' means you believe Gold will outperform SPY by 2.5% annually")
+        
+        with st.expander("📖 View Format Examples"):
+            st.markdown("""
+            - `GLD SPY 3.0` → Gold outperforms SPY by 3%
+            - `SPY CIBR -1.5` → SPY underperforms CIBR by 1.5% (or CIBR beats SPY by 1.5%)
+            - One view per line
+            - Value is the expected annual return difference in percentage points
+            """)
     else:
-        # Keep views_text in namespace for later checks; do not overwrite session value
         views_text = st.session_state.get('views_text', "GLD SPY 0.5\nGLD VTI 0.5")
+    
+    st.markdown("---")
+    
+    # Market Risk Premium (Advanced setting, collapsed by default)
+    with st.expander("🔧 Advanced: Market Risk Premium"):
+        market_risk_premium = st.slider(
+            "Assumed Market Risk Premium (Annual %)", 
+            5.0, 15.0, 10.0, 0.5,
+            help="Historical equity risk premium over risk-free rate. Used in equilibrium return calculations. Default: 10% (historical US equity premium)"
+        )
+        st.caption("💡 This affects equilibrium return calculations. 10% is the long-term historical equity risk premium in the US.")
+    
+    if 'market_risk_premium' not in locals():
+        market_risk_premium = 10.0  # Default if expander not opened
+    
     st.markdown("---")
     optimize_button = st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True)
 
@@ -422,7 +545,53 @@ if optimize_button:
                     st.info("You can enter overrides for missing tickers in the sidebar expander titled 'Manual size overrides for missing tickers'.")
                 w_market = np.array([1/len(tickers)] * len(tickers))
 
-            mu = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, returns_method)
+            mu = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium, returns_method)
+            
+            # Apply Historical Momentum Integration (if enabled)
+            if use_momentum_views:
+                P_momentum, Q_momentum, gaps = calculate_gap_views(
+                    returns, Sigma_decimal, w_market, rf_rate, market_risk_premium,
+                    confidence=momentum_confidence, min_gap_threshold=min_gap
+                )
+                
+                if P_momentum is not None and len(P_momentum) > 0:
+                    # Apply Black-Litterman with momentum views
+                    mu_bl, Sigma_bl, pi_eq = black_litterman(
+                        Sigma_percent_sq.values, w_market, rf_rate, market_risk_premium,
+                        P=P_momentum, Q_percent=Q_momentum
+                    )
+                    mu = pd.Series(mu_bl, index=tickers)
+                    Sigma_percent_sq = pd.DataFrame(Sigma_bl, index=tickers, columns=tickers)
+                    
+                    # Show what momentum integration did
+                    with st.expander("📈 Momentum Integration Results"):
+                        st.success(f"✅ Generated {len(Q_momentum)} momentum-based views")
+                        
+                        # Create comparison table
+                        mu_base = calculate_expected_returns(returns, Sigma_decimal, w_market, 
+                                                             rf_rate, market_risk_premium, returns_method)
+                        momentum_df = pd.DataFrame({
+                            'Historical': calculate_expected_returns(returns, Sigma_decimal, w_market,
+                                                                    rf_rate, market_risk_premium, 'historical'),
+                            'Equilibrium': mu_base,
+                            'Gap': gaps,
+                            'Momentum-Adjusted': mu
+                        }, index=tickers)
+                        
+                        st.dataframe(
+                            momentum_df.style.format({
+                                'Historical': '{:.2f}%',
+                                'Equilibrium': '{:.2f}%',
+                                'Gap': '{:.2f}%',
+                                'Momentum-Adjusted': '{:.2f}%'
+                            }).background_gradient(subset=['Gap'], cmap='RdYlGn', vmin=-10, vmax=10),
+                            use_container_width=True
+                        )
+                        
+                        st.caption(f"💡 Momentum confidence: {momentum_confidence*100:.0f}% | " +
+                                 f"Minimum significance: {min_gap:.1f}%")
+                else:
+                    st.info("ℹ️ No significant momentum detected (all gaps below threshold)")
             
             if use_custom_views and views_text.strip():
                 views_lines = [line.strip() for line in views_text.split('\n') if line.strip()]
@@ -492,10 +661,10 @@ if optimize_button:
                         st.warning(f"Skipping view because these tickers are not in the asset list: {', '.join(missing)}")
                 if P_list:
                     P, Q = np.array(P_list), np.array(Q_list)
-                    mu_bl, Sigma_bl, pi_eq = black_litterman(Sigma_percent_sq.values, w_market, rf_rate, P=P, Q_percent=Q)
+                    mu_bl, Sigma_bl, pi_eq = black_litterman(Sigma_percent_sq.values, w_market, rf_rate, market_risk_premium, P=P, Q_percent=Q)
                     mu = pd.Series(mu_bl, index=tickers)
                     Sigma_percent_sq = pd.DataFrame(Sigma_bl, index=tickers, columns=tickers)
-                    st.success("✅ Black-Litterman model applied with your views.")
+                    st.success("✅ Black-Litterman model applied with your custom views.")
 
             opt_result = optimize_portfolio(mu.values, Sigma_percent_sq.values, rf_rate)
             
@@ -606,14 +775,14 @@ if optimize_button:
                     
                     # Show comparison of returns methods
                     st.markdown("### Expected Returns Comparison")
-                    mu_hist = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, method='historical')
-                    mu_eq = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, method='equilibrium')
+                    mu_hist = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium, method='historical')
+                    mu_eq = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium, method='equilibrium')
                     
                     comparison_df = pd.DataFrame({
                         'Historical': mu_hist,
                         'Equilibrium': mu_eq,
                         'Difference': mu_hist - mu_eq,
-                        'Used': ['✓' if returns_method == 'historical' else '' for _ in tickers] if returns_method == 'historical' else ['✓' for _ in tickers]
+                        'Used': [('✓ (Momentum)' if use_momentum_views else '✓') if returns_method == 'equilibrium' else '✓' for _ in tickers]
                     }, index=tickers)
                     
                     st.dataframe(
@@ -633,7 +802,10 @@ if optimize_button:
                     with col3:
                         st.metric("Std Dev Difference", f"{(mu_hist.std() - mu_eq.std()):.2f}%")
                     
-                    st.info(f"💡 **Current Method**: {returns_method.title()} - The '{returns_method}' column is used in optimization.")
+                    method_used = returns_method.title()
+                    if returns_method == 'equilibrium' and use_momentum_views:
+                        method_used += " + Momentum Integration"
+                    st.info(f"💡 **Current Method**: {method_used}")
                     
                     st.markdown("---")
                     
