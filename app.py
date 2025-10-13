@@ -77,13 +77,6 @@ def get_market_cap_weights(tickers):
                 failed_tickers.append(ticker)
     # Return raw fetched sizes and list of failed tickers for UI handling
     return market_caps, failed_tickers
-    
-def n_portfolios(N, m=20):
-    """
-    Black-Litterman model implementation.
-    This function now correctly handles all unit conversions internally.
-    """
-    return comb(m + N - 1, N - 1)
 
 def black_litterman(Sigma_percent_sq, w_market, rf_percent, tau=0.025, P=None, Q_percent=None):
     """
@@ -571,11 +564,11 @@ if optimize_button:
                     st.subheader("Efficient Frontier & Capital Allocation Line")
                     # Generate random portfolios for plotting
                     # No. of sample weights per asset
-                    m = 20
+                    m = 5
                     # Total assets inserted by the user
                     N = len(tickers)
                     # Total random portfolios = comb(m + N - 1, N - 1)
-                    n_portfolios = comb(m + N - 1, N - 1)
+                    n_portfolios = max(3000, comb(m + N - 1, N - 1))
                     rand_results = np.zeros((3, n_portfolios))
                     for i in range(n_portfolios):
                         w = np.random.random(len(tickers)); w /= w.sum()
