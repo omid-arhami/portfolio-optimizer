@@ -266,7 +266,7 @@ if 'frequency' not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-    tickers_input = st.text_area("Asset Tickers (one per line)", "SPY\nVTI\nGLD\nSFY\nCIBR\nMCHI\nNVDA\nAVGO\nAMZN\nGOOG", height=150)
+    tickers_input = st.text_area("Asset Tickers (one per line)", "SPY\nGLD\nCIBR\nMAGS\nNVDA\nAVGO\nAMZN", height=150)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
     st.markdown("---")
     col1, col2 = st.columns(2)
@@ -281,7 +281,7 @@ with st.sidebar:
     returns_method = st.selectbox("Expected Returns Method", ["equilibrium", "historical"], index=0)
     
     if returns_method == "equilibrium": 
-        st.info("✅ **Using Equilibrium Returns (Reverse Optimization)**")
+        st.info("✅ **Using Equilibrium Returns**")
         with st.expander("ℹ️ What does this mean?"):
             st.markdown("""
             **Equilibrium returns** are calculated using reverse optimization from CAPM:
@@ -290,9 +290,7 @@ with st.sidebar:
             - Formula: Π = λ × Σ × wₘ (where λ is market risk aversion)
             - More stable than historical means
             - Forward-looking, not influenced by recent performance
-            
-            **Important**: This is NOT the same as Black-Litterman, which is an optional add-on.
-            
+                        
             **Result**: Conservative, theoretically-grounded expected returns
             """)
     else: 
@@ -675,7 +673,7 @@ else:
     with col2:
         st.markdown("#### 2️⃣ Set Preferences")
         st.markdown("""
-        - Enter risk-free rate (e.g., T-bill rate)
+        - Enter risk-free rate (e.g., Saving account or T-bill rate)
         - Adjust risk aversion (RA):
           - **RA = 2-4**: Aggressive
           - **RA = 4-6**: Moderate  
