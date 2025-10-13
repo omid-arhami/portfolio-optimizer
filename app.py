@@ -254,7 +254,7 @@ def calculate_risk_metrics(returns, weights, confidence=0.95):
     return {'var_95': var * 100, 'cvar_95': cvar * 100, 'max_drawdown': max_drawdown * 100}
 
 def calculate_gap_views(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium,
-                       confidence=0.5, min_gap_threshold=1.0):
+                       confidence=0.3, min_gap_threshold=1.0):
     """
     Calculate Black-Litterman views based on the gap between historical and equilibrium returns.
     
@@ -262,7 +262,7 @@ def calculate_gap_views(returns, Sigma_decimal, w_market, rf_rate, market_risk_p
     
     Parameters:
     - confidence: How much of the historical outperformance to incorporate (0-1)
-                 0.5 = "50% of past momentum will persist" (moderate/conservative)
+                 0.3 = "30% of past momentum will persist" (moderate/conservative)
     - min_gap_threshold: Only create views for assets with gaps larger than this (in %)
     
     Returns: P matrix, Q vector, and gaps DataFrame for display
@@ -372,43 +372,55 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Historical Momentum Integration (Default ON at 30%)
-    use_momentum_views = st.checkbox("📈 Historical Momentum Integration", value=True,
-        help="Blend recent performance trends with equilibrium returns using Black-Litterman model")
+    # Historical Momentum Integration (Only available for equilibrium method)
+    if returns_method == "equilibrium":
+        use_momentum_views = st.checkbox("📈 Historical Momentum Integration", value=True,
+            help="Blend recent performance trends with equilibrium returns using Black-Litterman model")
+        
+        if use_momentum_views:
+            st.markdown("**Black-Litterman Settings**")
+            momentum_confidence = st.slider(
+                "Momentum Persistence (%)", 
+                0, 100, 30, 5,
+                help="How much of the historical outperformance do you expect to continue? 30% = moderate, 50% = balanced, 70% = aggressive"
+            ) / 100
+            
+            min_gap = st.slider(
+                "Minimum Significance (%)", 
+                0.5, 5.0, 1.0, 0.5,
+                help="Only incorporate momentum for assets that outperformed/underperformed by at least this amount"
+            )
+            
+            with st.expander("ℹ️ How Momentum Integration Works"):
+                st.markdown("""
+                This feature uses the **Black-Litterman model** to blend equilibrium returns with recent trends:
+                
+                1. **Calculate the gap**: Historical return - Equilibrium return
+                2. **Scale by confidence**: If Gold's gap is +10% and confidence is 30%, the view is +3%
+                3. **Bayesian blending**: The model statistically combines equilibrium with your momentum views
+                
+                **Example**: 
+                - Gold historical return: 15%
+                - Gold equilibrium return: 5%
+                - Gap: 10%
+                - With 30% confidence → Black-Litterman adjusts Gold's expected return upward by ~3%
+                
+                **Why this works**:
+                - Momentum persists in the medium term (6-12 months) - empirical fact
+                - But it's not fully predictive - mean reversion also exists
+                - This approach balances both effects in a statistically principled way
+                """)
+    else:
+        # Historical method is selected - momentum integration is not applicable
+        use_momentum_views = False
+        st.info("ℹ️ **Momentum Integration**: Not applicable when using Historical returns (already incorporates past performance)")
     
-    if use_momentum_views:
-        st.markdown("**Black-Litterman Settings**")
-        momentum_confidence = st.slider(
-            "Momentum Persistence (%)", 
-            0, 100, 30, 5,
-            help="How much of the historical outperformance do you expect to continue? 30% = moderate, 50% = balanced, 70% = aggressive"
-        ) / 100
-        
-        min_gap = st.slider(
-            "Minimum Significance (%)", 
-            0.5, 5.0, 1.0, 0.5,
-            help="Only incorporate momentum for assets that outperformed/underperformed by at least this amount"
-        )
-        
-        with st.expander("ℹ️ How Momentum Integration Works"):
-            st.markdown("""
-            This feature uses the **Black-Litterman model** to blend equilibrium returns with recent trends:
-            
-            1. **Calculate the gap**: Historical return - Equilibrium return
-            2. **Scale by confidence**: If Gold's gap is +10% and confidence is 50%, the view is +5%
-            3. **Bayesian blending**: The model statistically combines equilibrium with your momentum views
-            
-            **Example**: 
-            - Gold historical return: 15%
-            - Gold equilibrium return: 5%
-            - Gap: 10%
-            - With 50% confidence → Black-Litterman softly adjusts Gold's expected return upward by 5%
-            
-            **Why this works**:
-            - Momentum persists in the medium term (6-12 months) - empirical fact
-            - But it's not fully predictive - mean reversion also exists
-            - This approach balances both effects in a statistically principled way
-            """)
+    if 'use_momentum_views' not in locals():
+        use_momentum_views = False
+    if 'momentum_confidence' not in locals():
+        momentum_confidence = 0.3
+    if 'min_gap' not in locals():
+        min_gap = 1.0
     
     st.markdown("---")
     
@@ -547,8 +559,8 @@ if optimize_button:
 
             mu = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium, returns_method)
             
-            # Apply Historical Momentum Integration (if enabled)
-            if use_momentum_views:
+            # Apply Historical Momentum Integration (only when using equilibrium method)
+            if returns_method == "equilibrium" and use_momentum_views:
                 P_momentum, Q_momentum, gaps = calculate_gap_views(
                     returns, Sigma_decimal, w_market, rf_rate, market_risk_premium,
                     confidence=momentum_confidence, min_gap_threshold=min_gap
@@ -782,7 +794,7 @@ if optimize_button:
                         'Historical': mu_hist,
                         'Equilibrium': mu_eq,
                         'Difference': mu_hist - mu_eq,
-                        'Used': [('✓ (Momentum)' if use_momentum_views else '✓') if returns_method == 'equilibrium' else '✓' for _ in tickers]
+                        'Used': [('✓ (Momentum)' if (returns_method == 'equilibrium' and use_momentum_views) else '✓') if returns_method == 'equilibrium' else '✓' if returns_method == 'historical' else '' for _ in tickers]
                     }, index=tickers)
                     
                     st.dataframe(
