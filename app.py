@@ -853,18 +853,28 @@ if run_opt:
                 col4.metric("Risky Allocation", f"{allocation['alpha']*100:.1f}%")
                 st.markdown("---")
                 
-                tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Allocation", "📈 Efficient Frontier", "⚠️ Risk Analysis", "📋 Model Details", "🔁 Portfolio Comparison"])
-                
-                with tab1:
+                # Use a persistent selector instead of st.tabs so the active view doesn't jump on reruns
+                if 'result_choice' not in st.session_state:
+                    st.session_state['result_choice'] = "Allocation"
+
+                result_choice = st.radio(
+                    "Select result view",
+                    ("Allocation", "Efficient Frontier", "Risk Analysis", "Model Details", "Portfolio Comparison"),
+                    index=(0 if st.session_state['result_choice'] not in ("Allocation", "Efficient Frontier", "Risk Analysis", "Model Details", "Portfolio Comparison") else ["Allocation", "Efficient Frontier", "Risk Analysis", "Model Details", "Portfolio Comparison"].index(st.session_state['result_choice'])),
+                    key='result_choice'
+                )
+
+                # Allocation view
+                if result_choice == "Allocation":
                     st.subheader("Final Portfolio Allocation")
                     final_weights = {'Risk-Free': (1 - allocation['alpha'])}
                     risky_weights = allocation['alpha'] * opt_result['weights']
                     for i, ticker in enumerate(tickers):
                         if risky_weights[i] > 0.005: final_weights[ticker] = risky_weights[i]
-                    
+
                     final_df = pd.DataFrame(final_weights.items(), columns=['Asset', 'Weight']).sort_values('Weight', ascending=False)
                     final_df['Weight (%)'] = final_df['Weight'] * 100
-                    
+
                     col1, col2 = st.columns([0.6, 0.4])
                     with col1:
                         fig = px.pie(final_df, values='Weight', names='Asset', title="Portfolio Composition", hole=0.3)
@@ -873,14 +883,11 @@ if run_opt:
                     with col2:
                         st.dataframe(final_df[['Asset', 'Weight (%)']].style.format({'Weight (%)': '{:.2f}%'}), hide_index=True, use_container_width=True)
 
-                with tab2:
+                # Efficient frontier view
+                if result_choice == "Efficient Frontier":
                     st.subheader("Efficient Frontier & Capital Allocation Line")
-                    # Generate random portfolios for plotting
-                    # No. of sample weights per asset
                     m = 5
-                    # Total assets inserted by the user
                     N = len(tickers)
-                    # Total random portfolios = comb(m + N - 1, N - 1)
                     n_portfolios = max(3000, comb(m + N - 1, N - 1))
                     rand_results = np.zeros((3, n_portfolios))
                     for i in range(n_portfolios):
@@ -892,16 +899,11 @@ if run_opt:
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=rand_results[1,:], y=rand_results[0,:], mode='markers', name='Random Portfolios',
                         marker=dict(color=rand_results[2,:], showscale=True, colorscale='viridis', size=5, colorbar=dict(title="Sharpe Ratio"))))
-                    
-                    # Add Optimal Risky Portfolio (Tangency)
                     fig.add_trace(go.Scatter(x=[opt_result['volatility']], y=[opt_result['return']], mode='markers', name='Optimal Risky Portfolio',
                         marker=dict(color='red', size=12, symbol='star')))
-                    
-                    # Add Final User Portfolio
                     fig.add_trace(go.Scatter(x=[allocation['final_volatility']], y=[allocation['final_return']], mode='markers', name='Your Portfolio',
                         marker=dict(color='green', size=12, symbol='diamond')))
 
-                    # Add Capital Allocation Line
                     x_cal = np.linspace(0, opt_result['volatility'] * 1.5, 100)
                     y_cal = rf_rate + opt_result['sharpe'] * x_cal
                     fig.add_trace(go.Scatter(x=x_cal, y=y_cal, mode='lines', name='Capital Allocation Line', line=dict(color='darkorange', width=2, dash='dash')))
@@ -909,28 +911,28 @@ if run_opt:
                     fig.update_layout(title="Efficient Frontier", xaxis_title="Volatility (Annual %)", yaxis_title="Expected Return (Annual %)", height=500, legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
                     st.plotly_chart(fig, use_container_width=True)
 
-                with tab3:
+                # Risk analysis view
+                if result_choice == "Risk Analysis":
                     st.subheader("Downside Risk Analysis")
                     col1, col2, col3 = st.columns(3)
                     col1.metric("Value-at-Risk (95%)", f"{risk_metrics['var_95']:.2f}%", help=f"Your portfolio is not expected to lose more than {abs(risk_metrics['var_95']):.2f}% in a single {st.session_state.frequency} period, with 95% confidence.")
                     col2.metric("Conditional VaR (95%)", f"{risk_metrics['cvar_95']:.2f}%", help=f"In the worst 5% of scenarios, the average loss is expected to be {abs(risk_metrics['cvar_95']):.2f}%.")
                     col3.metric("Max Historical Drawdown", f"{risk_metrics['max_drawdown']:.2f}%", help="The largest peak-to-trough decline observed in the historical data.")
-                
-                with tab4:
+
+                # Model details view
+                if result_choice == "Model Details":
                     st.subheader("Model Inputs & Outputs")
-                    
-                    # Show comparison of returns methods
                     st.markdown("### Expected Returns Comparison")
                     mu_hist = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium, method='historical')
                     mu_eq = calculate_expected_returns(returns, Sigma_decimal, w_market, rf_rate, market_risk_premium, method='equilibrium')
-                    
+
                     comparison_df = pd.DataFrame({
                         'Historical': mu_hist,
                         'Equilibrium': mu_eq,
                         'Difference': mu_hist - mu_eq,
                         'Used': [('✓ (Momentum)' if (returns_method == 'equilibrium' and use_momentum_views) else '✓') if returns_method == 'equilibrium' else '✓' if returns_method == 'historical' else '' for _ in tickers]
                     }, index=tickers)
-                    
+
                     st.dataframe(
                         comparison_df.style.format({
                             'Historical': '{:.2f}%',
@@ -939,7 +941,7 @@ if run_opt:
                         }).background_gradient(subset=['Historical', 'Equilibrium'], cmap='RdYlGn', vmin=0, vmax=20),
                         use_container_width=True
                     )
-                    
+
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric("Historical Avg", f"{mu_hist.mean():.2f}%")
@@ -947,14 +949,13 @@ if run_opt:
                         st.metric("Equilibrium Avg", f"{mu_eq.mean():.2f}%")
                     with col3:
                         st.metric("Std Dev Difference", f"{(mu_hist.std() - mu_eq.std()):.2f}%")
-                    
+
                     method_used = returns_method.title()
                     if returns_method == 'equilibrium' and use_momentum_views:
                         method_used += " + Momentum Integration"
                     st.info(f"💡 **Current Method**: {method_used}")
-                    
+
                     st.markdown("---")
-                    
                     col1, col2 = st.columns(2)
                     with col1:
                         st.markdown("**Expected Returns (Annual %)**")
@@ -963,27 +964,28 @@ if run_opt:
                         st.markdown("**Volatility (Annual %)**")
                         vol_df = pd.DataFrame({'Volatility': np.sqrt(np.diag(Sigma_percent_sq))}, index=tickers)
                         st.dataframe(vol_df.style.format('{:.2f}%'), use_container_width=True)
-                    
+
                     st.markdown("**Correlation Matrix**")
                     fig = px.imshow(returns.corr(), text_auto='.2f', aspect='auto', color_continuous_scale='RdBu_r', title="Asset Correlation", zmin=-1, zmax=1)
                     st.plotly_chart(fig, use_container_width=True)
 
-                with tab5:
+                # Portfolio Comparison view
+                if result_choice == "Portfolio Comparison":
                     st.subheader("Portfolio Comparison vs Optimal")
                     st.markdown("Enter your actual portfolio below (one per line: TICKER WEIGHT). We accept weights as decimals (0.25) or percents (25%). We will normalize to 1.0.")
                     actual_text = st.text_area("Your Actual Portfolio", "SPY 0.25\nAAPL 0.05\nBND 0.70", height=180)
 
                     compare_btn = st.button("Compare Portfolios")
                     if compare_btn:
+                        # Keep the UI focused on the Portfolio Comparison view after rerun
+                        st.session_state['result_choice'] = 'Portfolio Comparison'
                         actual = parse_actual_portfolio(actual_text)
                         if not actual:
                             st.error("Could not parse actual portfolio. Ensure each line contains 'TICKER WEIGHT' and weights sum to > 0.")
                         else:
-                            # Expanded universe
                             expanded = sorted(set(tickers) | set(actual.keys()))
                             st.info(f"Expanded universe: {', '.join(expanded)}")
 
-                            # Download any missing data
                             missing_tickers = [t for t in expanded if t not in prices.columns]
                             if missing_tickers:
                                 with st.spinner("Downloading additional historic data for expanded universe..."):
@@ -991,53 +993,42 @@ if run_opt:
                                     if more_prices is None:
                                         st.warning("Could not download data for some tickers; they will be excluded from comparison.")
                                         more_prices = pd.DataFrame()
-                                    # merge
                                     if not more_prices.empty:
                                         prices = pd.concat([prices, more_prices], axis=1)
 
-                            # Recompute returns, covariance and mu aligned to expanded universe
                             returns_exp = calculate_returns(prices[expanded].dropna(axis=1, how='all'), st.session_state.frequency)
                             periods_per_year = 52 if st.session_state.frequency == 'weekly' else 12
                             Sigma_percent_sq_exp = returns_exp.cov() * periods_per_year * 10000
                             Sigma_decimal_exp = Sigma_percent_sq_exp.values / 10000
 
-                            # Align expected returns: if not present in mu, compute historical as fallback
                             mu_exp = {}
                             for t in expanded:
                                 if t in mu.index:
                                     mu_exp[t] = mu.loc[t]
                                 else:
-                                    # fallback to historical mean annual
                                     if t in returns_exp.columns:
                                         mu_exp[t] = float(returns_exp[t].mean() * periods_per_year * 100)
                                     else:
                                         mu_exp[t] = 0.0
                             mu_exp = pd.Series(mu_exp)
 
-                            # Align weights
                             w_opt = align_weights(expanded, dict(zip(tickers, opt_result['weights'])))
                             w_act = align_weights(expanded, actual)
 
-                            # Compute stats
                             opt_stats = portfolio_stats_from_weights(w_opt, mu_exp.values, Sigma_percent_sq_exp.values, rf_rate)
                             act_stats = portfolio_stats_from_weights(w_act, mu_exp.values, Sigma_percent_sq_exp.values, rf_rate)
 
-                            # Tracking error and Mahalanobis
                             te_percent, maha = tracking_error_and_mahalanobis(w_act, w_opt, Sigma_decimal_exp)
 
-                            # Sharpe gap etc
                             sharpe_gap = act_stats['sharpe'] - opt_stats['sharpe']
                             return_gap = act_stats['return'] - opt_stats['return']
                             vol_gap = act_stats['volatility'] - opt_stats['volatility']
                             score = overall_deviation_score(sharpe_gap, te_percent, return_gap, vol_gap)
 
-                            # Substitution analysis for actual-only assets
                             actual_only = [t for t in actual.keys() if t not in tickers]
-                            # build optimal portfolio returns series per period
                             opt_port_returns = returns_exp @ w_opt
                             subs_df = substitution_analysis(actual_only, returns_exp, mu_exp, opt_port_returns)
 
-                            # Show summary metrics
                             colA, colB, colC, colD = st.columns(4)
                             colA.metric("Deviation Score", f"{score:.1f}/100")
                             colB.metric("Tracking Error", f"{te_percent:.2f}%")
