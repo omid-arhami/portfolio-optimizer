@@ -366,51 +366,20 @@ def portfolio_stats_from_weights(weights, mu_percent, Sigma_percent_sq, rf_perce
     return {'return': port_return, 'volatility': port_vol, 'sharpe': sharpe}
 
 
-def tracking_error_and_mahalanobis(w_actual, w_optimal, Sigma_decimal):
-    """Compute tracking error (percent) and Mahalanobis distance using decimal covariance."""
-    d = w_actual - w_optimal
-    # Tracking error (decimal) = sqrt(d^T Sigma_decimal d)
-    te_decimal = np.sqrt(float(d @ Sigma_decimal @ d)) if d.size > 0 else 0.0
-    te_percent = te_decimal * 100
-
-    # Mahalanobis using pseudo-inverse for stability
-    try:
-        Sigma_inv = np.linalg.pinv(Sigma_decimal)
-        m = np.sqrt(float(d @ Sigma_inv @ d))
-    except Exception:
-        m = float(np.sqrt(d @ d))
-
-    return te_percent, m
-
-
-def substitution_analysis(actual_only, returns_df, mu_series, opt_portfolio_returns):
-    """For assets present in actual_only (list), compute correlation with optimal portfolio,
-    return difference, and quality score per guide.
-    returns_df: aligned returns DataFrame columns are tickers
-    mu_series: expected returns (annual %) indexed by ticker
-    opt_portfolio_returns: series of portfolio returns per period for the optimal portfolio
+def overall_deviation_score(sharpe_gap, return_gap_percent, vol_gap_percent):
+    """Compute composite deviation score - lower is better (0-100 scale)
+    
+    This score tells you how far your portfolio is from optimal.
+    0-20: Excellent, very close to optimal
+    20-40: Good, minor improvements possible
+    40-60: Fair, some optimization needed
+    60-80: Poor, significant improvements available
+    80-100: Very poor, major changes recommended
     """
-    rows = []
-    for t in actual_only:
-        if t not in returns_df.columns:
-            continue
-        series = returns_df[t]
-        corr = series.corr(opt_portfolio_returns)
-        asset_return = float(mu_series.get(t, np.nan))
-        opt_return = float(mu_series.mean()) if len(mu_series) > 0 else np.nan
-        ret_diff = asset_return - opt_return
-        quality = corr - abs(ret_diff) / 10.0
-        rows.append({'Ticker': t, 'Correlation': corr, 'Return (%)': asset_return, 'Return vs Optimal (%)': ret_diff, 'Quality': quality})
-    return pd.DataFrame(rows).set_index('Ticker') if rows else pd.DataFrame()
-
-
-def overall_deviation_score(sharpe_gap, tracking_error_percent, return_gap_percent, vol_gap_percent):
-    """Compute composite deviation score as described in the guide."""
-    sharpe_penalty = abs(sharpe_gap) * 30
-    tracking_penalty = tracking_error_percent * 2
-    return_penalty = abs(return_gap_percent) * 1.5
-    vol_penalty = abs(vol_gap_percent) * 1.0
-    total = sharpe_penalty + tracking_penalty + return_penalty + vol_penalty
+    sharpe_penalty = abs(sharpe_gap) * 40  # Sharpe is most important
+    return_penalty = abs(return_gap_percent) * 2
+    vol_penalty = abs(vol_gap_percent) * 1.5
+    total = sharpe_penalty + return_penalty + vol_penalty
     return min(100.0, total)
 
 
@@ -969,27 +938,45 @@ if run_opt:
                     st.plotly_chart(fig, use_container_width=True)
 
                 with tab5:
-                    st.subheader("Portfolio Comparison vs Optimal")
-                    st.markdown("Enter your actual portfolio below (one per line: TICKER WEIGHT). Find weights of only the risky assets (exclude risk-free). We accept weights as decimals (0.25) or percents (25%).")
-                    actual_text = st.text_area("Your Actual Portfolio", "SPY 0.25\nAAPL 0.05\nBND 0.70", height=180)
+                    st.subheader("Compare Your Portfolio vs Optimal")
+                    
+                    st.info("⚠️ **Important**: Enter only your **risky assets** (stocks, ETFs, etc.). Exclude cash and risk-free holdings.")
+                    
+                    st.markdown("""
+                    This tool compares your current risky asset allocation against the optimal allocation calculated above.
+                    
+                    **Instructions:**
+                    - Enter each asset on a new line: `TICKER WEIGHT`
+                    - Weights can be decimals (0.25) or percentages (25% or 25)
+                    - Weights will be automatically normalized to sum to 100%
+                    - Do NOT include cash, bonds, or other risk-free assets
+                    
+                    **Example:**
+                    ```
+                    SPY 0.60
+                    GLD 0.25
+                    AAPL 15
+                    ```
+                    """)
+                    
+                    actual_text = st.text_area("Your Risky Assets Portfolio", "SPY 0.60\nAAPL 0.15\nGLD 0.25", height=150)
 
-                    compare_btn = st.button("Compare Portfolios")
+                    compare_btn = st.button("🔍 Compare Portfolios", type="primary")
                     if compare_btn:
                         actual = parse_actual_portfolio(actual_text)
                         if not actual:
-                            st.error("Could not parse actual portfolio. Ensure each line contains 'TICKER WEIGHT' and weights sum to > 0.")
+                            st.error("❌ Could not parse portfolio. Ensure each line contains 'TICKER WEIGHT' and weights sum to > 0.")
                         else:
                             # Expanded universe
                             expanded = sorted(set(tickers) | set(actual.keys()))
-                            st.info(f"Expanded universe: {', '.join(expanded)}")
 
                             # Download any missing data
                             missing_tickers = [t for t in expanded if t not in prices.columns]
                             if missing_tickers:
-                                with st.spinner("Downloading additional historic data for expanded universe..."):
+                                with st.spinner("Downloading additional historic data..."):
                                     more_prices = download_data(missing_tickers, start_date, end_date)
                                     if more_prices is None:
-                                        st.warning("Could not download data for some tickers; they will be excluded from comparison.")
+                                        st.warning("⚠️ Could not download data for some tickers; they will be excluded.")
                                         more_prices = pd.DataFrame()
                                     # merge
                                     if not more_prices.empty:
@@ -999,7 +986,6 @@ if run_opt:
                             returns_exp = calculate_returns(prices[expanded].dropna(axis=1, how='all'), st.session_state.frequency)
                             periods_per_year = 52 if st.session_state.frequency == 'weekly' else 12
                             Sigma_percent_sq_exp = returns_exp.cov() * periods_per_year * 10000
-                            Sigma_decimal_exp = Sigma_percent_sq_exp.values / 10000
 
                             # Align expected returns: if not present in mu, compute historical as fallback
                             mu_exp = {}
@@ -1022,49 +1008,126 @@ if run_opt:
                             opt_stats = portfolio_stats_from_weights(w_opt, mu_exp.values, Sigma_percent_sq_exp.values, rf_rate)
                             act_stats = portfolio_stats_from_weights(w_act, mu_exp.values, Sigma_percent_sq_exp.values, rf_rate)
 
-                            # Tracking error and Mahalanobis
-                            te_percent, maha = tracking_error_and_mahalanobis(w_act, w_opt, Sigma_decimal_exp)
-
-                            # Sharpe gap etc
+                            # Calculate gaps
                             sharpe_gap = act_stats['sharpe'] - opt_stats['sharpe']
                             return_gap = act_stats['return'] - opt_stats['return']
                             vol_gap = act_stats['volatility'] - opt_stats['volatility']
-                            score = overall_deviation_score(sharpe_gap, te_percent, return_gap, vol_gap)
+                            score = overall_deviation_score(sharpe_gap, return_gap, vol_gap)
 
-                            # Substitution analysis for actual-only assets
+                            # --- Main Score Card ---
+                            st.markdown("---")
+                            st.markdown("### 📊 Deviation Score")
+                            
+                            # Score interpretation
+                            if score < 20:
+                                score_color = "green"
+                                score_label = "Excellent"
+                                score_desc = "Your portfolio is very close to optimal!"
+                            elif score < 40:
+                                score_color = "lightgreen"
+                                score_label = "Good"
+                                score_desc = "Minor improvements possible, but overall strong allocation."
+                            elif score < 60:
+                                score_color = "orange"
+                                score_label = "Fair"
+                                score_desc = "Some optimization could improve risk-adjusted returns."
+                            elif score < 80:
+                                score_color = "darkorange"
+                                score_label = "Needs Improvement"
+                                score_desc = "Significant improvements available with reallocation."
+                            else:
+                                score_color = "red"
+                                score_label = "Poor"
+                                score_desc = "Major changes recommended to improve efficiency."
+                            
+                            col1, col2, col3 = st.columns([1, 2, 1])
+                            with col2:
+                                st.markdown(f"""
+                                <div style="text-align: center; padding: 30px; background-color: {score_color}; border-radius: 10px; color: white;">
+                                    <h1 style="margin: 0; font-size: 72px;">{score:.0f}</h1>
+                                    <h3 style="margin: 10px 0 0 0;">{score_label}</h3>
+                                    <p style="margin: 10px 0 0 0; font-size: 14px;">{score_desc}</p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            st.markdown("---")
+                            
+                            # --- Detailed Comparison ---
+                            st.markdown("### 📈 Performance Comparison")
+                            
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                delta_return = act_stats['return'] - opt_stats['return']
+                                col1.metric(
+                                    "Expected Return",
+                                    f"{act_stats['return']:.2f}%",
+                                    f"{delta_return:+.2f}% vs optimal",
+                                    delta_color="normal"
+                                )
+                            
+                            with col2:
+                                delta_vol = act_stats['volatility'] - opt_stats['volatility']
+                                col2.metric(
+                                    "Volatility (Risk)",
+                                    f"{act_stats['volatility']:.2f}%",
+                                    f"{delta_vol:+.2f}% vs optimal",
+                                    delta_color="inverse"
+                                )
+                            
+                            with col3:
+                                delta_sharpe = act_stats['sharpe'] - opt_stats['sharpe']
+                                col3.metric(
+                                    "Sharpe Ratio",
+                                    f"{act_stats['sharpe']:.3f}",
+                                    f"{delta_sharpe:+.3f} vs optimal",
+                                    delta_color="normal"
+                                )
+                            
+                            st.markdown("---")
+                            
+                            # --- Weight Comparison ---
+                            st.markdown("### 🎯 Asset Allocation Comparison")
+                            
+                            wc = pd.DataFrame({
+                                'Optimal %': w_opt * 100,
+                                'Your %': w_act * 100
+                            }, index=expanded)
+                            wc['Difference'] = wc['Your %'] - wc['Optimal %']
+                            
+                            # Only show assets with non-zero allocation in either portfolio
+                            wc = wc[(wc['Optimal %'] > 0.01) | (wc['Your %'] > 0.01)]
+                            wc = wc.sort_values('Difference', key=abs, ascending=False)
+                            
+                            st.dataframe(
+                                wc.style.format('{:.2f}%')
+                                .background_gradient(subset=['Difference'], cmap='RdYlGn', vmin=-50, vmax=50),
+                                use_container_width=True
+                            )
+                            
+                            st.caption("💡 Positive difference = You're overweight. Negative = You're underweight.")
+                            
+                            # --- Assets only in your portfolio ---
                             actual_only = [t for t in actual.keys() if t not in tickers]
-                            # build optimal portfolio returns series per period
-                            opt_port_returns = returns_exp @ w_opt
-                            subs_df = substitution_analysis(actual_only, returns_exp, mu_exp, opt_port_returns)
-
-                            # Show summary metrics
-                            colA, colB, colC, colD = st.columns(4)
-                            colA.metric("Deviation Score", f"{score:.1f}/100")
-                            colB.metric("Tracking Error", f"{te_percent:.2f}%")
-                            colC.metric("Return Gap", f"{return_gap:.2f}%")
-                            colD.metric("Volatility Gap", f"{vol_gap:.2f}%")
-
+                            if actual_only:
+                                st.markdown("---")
+                                st.markdown("### 🔍 Assets Not in Optimal Portfolio")
+                                st.info(f"These assets are in your portfolio but not recommended by the optimizer: **{', '.join(actual_only)}**")
+                                
+                                # Show their expected returns
+                                only_df = pd.DataFrame({
+                                    'Ticker': actual_only,
+                                    'Your Allocation (%)': [actual[t] * 100 for t in actual_only],
+                                    'Expected Return (%)': [mu_exp.get(t, 0) for t in actual_only]
+                                })
+                                st.dataframe(
+                                    only_df.style.format({'Your Allocation (%)': '{:.2f}%', 'Expected Return (%)': '{:.2f}%'}),
+                                    hide_index=True,
+                                    use_container_width=True
+                                )
+                            
                             st.markdown("---")
-                            st.subheader("Portfolio Statistics")
-                            stats_df = pd.DataFrame({'Optimal': [opt_stats['return'], opt_stats['volatility'], opt_stats['sharpe']],
-                                                      'Actual': [act_stats['return'], act_stats['volatility'], act_stats['sharpe']]},
-                                                     index=['Return (%)', 'Volatility (%)', 'Sharpe']).T
-                            st.dataframe(stats_df.style.format('{:.2f}'), use_container_width=True)
-
-                            st.subheader("Weight Comparison")
-                            wc = pd.DataFrame({'Ticker': expanded, 'Optimal Weight': w_opt, 'Actual Weight': w_act})
-                            wc['Diff'] = wc['Actual Weight'] - wc['Optimal Weight']
-                            wc = wc.set_index('Ticker')
-                            st.dataframe((wc*100).style.format('{:.2f}%').background_gradient(subset=['Diff'], cmap='RdYlGn'))
-
-                            if not subs_df.empty:
-                                st.subheader("Substitution Analysis (assets only in your actual portfolio)")
-                                st.dataframe(subs_df.style.format({'Correlation': '{:.2f}', 'Return (%)': '{:.2f}%', 'Return vs Optimal (%)': '{:.2f}%', 'Quality': '{:.2f}'}), use_container_width=True)
-
-                            st.markdown("---")
-                            st.subheader("Limitations")
-                            st.markdown("- The Deviation Score is a composite metric (Sharpe penalty ×30, Tracking ×2, Return ×1.5, Volatility ×1). Lower is better.")
-                            st.markdown("- This analysis ignores transaction costs, taxes, and liquidity constraints, and uses numerical stability techniques. Use the score as a heuristic, not financial advice.")
+                            st.caption("⚠️ **Disclaimer**: This analysis ignores transaction costs, taxes, and liquidity constraints. Use as guidance, not financial advice.")
 
         except Exception as e:
             st.error(f"An unexpected error occurred: {e}")
@@ -1133,4 +1196,3 @@ st.caption("Disclaimer: This tool is for educational purposes only and does not 
 
 # BSD 3-Clause License footer (single block)
 st.markdown("Copyright (c) 2025, Omid Arhami. Licensed under the BSD 3-Clause License.")
-
