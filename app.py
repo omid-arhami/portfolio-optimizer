@@ -564,11 +564,33 @@ with st.sidebar:
     
     st.markdown("---")
     optimize_button = st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True)
+    # Allow results to persist across reruns
+    if 'show_results' not in st.session_state:
+        st.session_state['show_results'] = False
 
-if optimize_button:
+run_opt = optimize_button or st.session_state.get('show_results', False)
+
+if run_opt:
     with st.spinner("Processing... This may take a moment."):
         try:
-            prices = download_data(tickers, start_date, end_date)
+            # If this execution is a rerun triggered by a later button (e.g., Compare Portfolios),
+            # restore data from session_state; otherwise perform a fresh run.
+            if not optimize_button and st.session_state.get('show_results'):
+                prices = st.session_state.get('cmp_prices')
+                tickers = st.session_state.get('cmp_tickers')
+                returns = st.session_state.get('cmp_returns')
+                Sigma_percent_sq = st.session_state.get('cmp_Sigma_percent_sq')
+                # If Sigma_percent_sq was stored as a numpy array, convert it back to DataFrame
+                if Sigma_percent_sq is not None and not hasattr(Sigma_percent_sq, 'columns'):
+                    Sigma_percent_sq = pd.DataFrame(np.array(Sigma_percent_sq), index=tickers, columns=tickers)
+                mu = st.session_state.get('cmp_mu')
+                Sigma_decimal = Sigma_percent_sq.values / 10000 if Sigma_percent_sq is not None else None
+                w_market = st.session_state.get('cmp_w_market')
+                market_caps = st.session_state.get('cmp_market_caps', {})
+                failed_tickers = st.session_state.get('cmp_failed_tickers', [])
+                opt_result = st.session_state.get('cmp_opt_result')
+            else:
+                prices = download_data(tickers, start_date, end_date)
             if prices is None or prices.empty: st.stop()
             
             tickers = list(prices.columns) # Update tickers to only valid ones
@@ -784,6 +806,18 @@ if optimize_button:
                 allocation = allocate_risky_riskfree(opt_result, rf_rate, risk_aversion)
                 risk_metrics = calculate_risk_metrics(returns, opt_result['weights'])
                 st.success("✅ Optimization Complete!")
+                # Persist relevant objects so follow-up actions (like comparisons) work across reruns
+                st.session_state['show_results'] = True
+                st.session_state['cmp_prices'] = prices
+                st.session_state['cmp_tickers'] = tickers
+                st.session_state['cmp_returns'] = returns
+                # store Sigma_percent_sq as plain array or DataFrame (picklable)
+                st.session_state['cmp_Sigma_percent_sq'] = Sigma_percent_sq.values if hasattr(Sigma_percent_sq, 'values') else Sigma_percent_sq
+                st.session_state['cmp_mu'] = mu
+                st.session_state['cmp_opt_result'] = opt_result
+                st.session_state['cmp_w_market'] = w_market
+                st.session_state['cmp_market_caps'] = market_caps
+                st.session_state['cmp_failed_tickers'] = failed_tickers
                 
                 # --- DIAGNOSTIC INFO ---
                 with st.expander("🔍 Optimization Process Details"):
