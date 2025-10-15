@@ -366,6 +366,126 @@ def portfolio_stats_from_weights(weights, mu_percent, Sigma_percent_sq, rf_perce
     return {'return': port_return, 'volatility': port_vol, 'sharpe': sharpe}
 
 
+def calculate_tracking_error_contribution(w_actual, w_optimal, Sigma_decimal):
+    """
+    Calculate each asset's contribution to tracking error from optimal portfolio.
+    
+    Tracking error variance: TE² = (w_actual - w_optimal)^T Σ (w_actual - w_optimal)
+    Asset i's marginal contribution to TE²: w_active_i * (Σ * w_active)_i
+    
+    This accounts for correlations - assets that deviate from optimal but are highly
+    correlated with the optimal portfolio contribute less to tracking error.
+    
+    Returns:
+    - te: total tracking error (%)
+    - contributions: each asset's absolute contribution to TE²
+    - contribution_pct: percentage contribution to total TE²
+    """
+    w_active = w_actual - w_optimal
+    
+    # Calculate tracking error variance (in decimal terms)
+    te_variance_decimal = w_active @ Sigma_decimal @ w_active
+    te_decimal = np.sqrt(max(0, te_variance_decimal))
+    te_percent = te_decimal * 100
+    
+    # Calculate each asset's marginal contribution to variance
+    Sigma_w_active = Sigma_decimal @ w_active
+    contributions = w_active * Sigma_w_active  # in decimal²
+    
+    # Convert to percentage of total TE variance
+    if te_variance_decimal > 0:
+        contribution_pct = (contributions / te_variance_decimal) * 100
+    else:
+        contribution_pct = np.zeros_like(contributions)
+    
+    return te_percent, contributions, contribution_pct
+
+
+def calculate_asset_correlation_with_portfolio(returns_df, ticker, portfolio_weights, tickers):
+    """
+    Calculate correlation between an individual asset and a portfolio.
+    
+    High correlation means the asset behaves similarly to the portfolio,
+    making it a potential substitute.
+    """
+    if ticker not in returns_df.columns:
+        return 0.0
+    
+    # Calculate portfolio returns
+    portfolio_returns = returns_df[tickers] @ portfolio_weights
+    asset_returns = returns_df[ticker]
+    
+    correlation = asset_returns.corr(portfolio_returns)
+    return correlation if not np.isnan(correlation) else 0.0
+
+
+def find_best_substitute_in_optimal(ticker, optimal_tickers, returns_df):
+    """
+    Find which asset in the optimal portfolio is most correlated with this ticker.
+    This helps identify substitution relationships.
+    
+    Returns: (best_substitute_ticker, correlation, is_good_substitute)
+    """
+    if ticker not in returns_df.columns:
+        return None, 0.0, False
+    
+    best_corr = -1
+    best_ticker = None
+    
+    asset_returns = returns_df[ticker]
+    
+    for opt_ticker in optimal_tickers:
+        if opt_ticker not in returns_df.columns:
+            continue
+        if opt_ticker == ticker:
+            continue
+        
+        opt_returns = returns_df[opt_ticker]
+        corr = asset_returns.corr(opt_returns)
+        
+        if not np.isnan(corr) and abs(corr) > abs(best_corr):
+            best_corr = corr
+            best_ticker = opt_ticker
+    
+    # Consider it a "good substitute" if correlation > 0.7
+    is_good_substitute = best_corr > 0.7
+    
+    return best_ticker, best_corr, is_good_substitute
+
+
+def calculate_marginal_sharpe_contribution(w_portfolio, i, mu_decimal, Sigma_decimal, rf_decimal):
+    """
+    Calculate the marginal contribution of asset i to portfolio Sharpe ratio.
+    
+    This uses the formula:
+    ∂SR/∂w_i = (1/σ_p) * [μ_i - RF - SR_p * (Σw)_i]
+    
+    Where:
+    - SR_p is current portfolio Sharpe ratio
+    - σ_p is portfolio volatility
+    - (Σw)_i is asset i's contribution to portfolio variance
+    
+    Returns: marginal Sharpe contribution (how much Sharpe changes per unit weight)
+    """
+    # Portfolio stats
+    mu_p = w_portfolio @ mu_decimal
+    sigma_p_sq = w_portfolio @ Sigma_decimal @ w_portfolio
+    sigma_p = np.sqrt(max(0, sigma_p_sq))
+    
+    if sigma_p < 1e-10:
+        return 0.0
+    
+    sharpe_p = (mu_p - rf_decimal) / sigma_p
+    
+    # Marginal contribution to variance
+    marginal_var = (Sigma_decimal @ w_portfolio)[i]
+    
+    # Marginal Sharpe
+    marginal_sharpe = (1 / sigma_p) * (mu_decimal[i] - rf_decimal - sharpe_p * marginal_var)
+    
+    return marginal_sharpe
+
+
 def overall_deviation_score(sharpe_gap, return_gap_percent, vol_gap_percent):
     """Compute composite deviation score - lower is better (0-100 scale)
     
@@ -383,25 +503,44 @@ def overall_deviation_score(sharpe_gap, return_gap_percent, vol_gap_percent):
     return min(100.0, total)
 
 
-def generate_improvement_suggestions(w_actual, w_optimal, tickers, mu_percent, Sigma_percent_sq, rf_percent, top_n=10):
+def generate_improvement_suggestions(w_actual, w_optimal, tickers, mu_percent, Sigma_percent_sq, 
+                                    rf_percent, optimal_tickers, returns_df, top_n=10):
     """
-    Generate ranked suggestions for improving the portfolio one ticker at a time.
+    Generate correlation-aware ranked suggestions for improving the portfolio.
     
-    Returns a list of suggestions, each with:
-    - Ticker
-    - Action (e.g., "Increase from 10% to 15%", "Add 8%", "Remove completely")
-    - Sharpe improvement
-    - Return improvement
-    - Impact score (combination of improvements)
+    This advanced version considers:
+    - Tracking error contribution (how much each deviation matters)
+    - Correlation with optimal portfolio (substitution effects)
+    - Marginal Sharpe contribution (incremental value)
+    - Asset similarity analysis (finding substitutes)
+    
+    Parameters:
+    - optimal_tickers: List of tickers in the original optimal portfolio
+    - returns_df: DataFrame of historical returns for correlation analysis
+    
+    Returns suggestions with comprehensive analysis of each change.
     """
     suggestions = []
+    
+    # Convert to decimal for calculations
+    mu_decimal = np.array(mu_percent) / 100
+    Sigma_decimal = np.array(Sigma_percent_sq) / 10000
+    rf_decimal = rf_percent / 100
     
     # Calculate baseline stats
     baseline_stats = portfolio_stats_from_weights(w_actual, mu_percent, Sigma_percent_sq, rf_percent)
     baseline_sharpe = baseline_stats['sharpe']
     baseline_return = baseline_stats['return']
     
-    # For each ticker, consider changes
+    # Calculate tracking error and contributions
+    te_total, te_contributions, te_contribution_pct = calculate_tracking_error_contribution(
+        w_actual, w_optimal, Sigma_decimal
+    )
+    
+    # Calculate optimal portfolio returns for correlation analysis
+    optimal_portfolio_returns = returns_df[optimal_tickers] @ w_optimal[:len(optimal_tickers)]
+    
+    # Analyze each ticker
     for i, ticker in enumerate(tickers):
         current_weight = w_actual[i]
         optimal_weight = w_optimal[i]
@@ -410,74 +549,200 @@ def generate_improvement_suggestions(w_actual, w_optimal, tickers, mu_percent, S
         if abs(current_weight - optimal_weight) < 0.005:
             continue
         
-        # Strategy 1: Move halfway to optimal (practical compromise)
-        halfway_weight = (current_weight + optimal_weight) / 2
-        new_weights_halfway = w_actual.copy()
-        new_weights_halfway[i] = halfway_weight
-        # Renormalize other weights proportionally
-        other_sum = new_weights_halfway.sum() - halfway_weight
-        if other_sum > 0:
-            for j in range(len(tickers)):
-                if j != i:
-                    new_weights_halfway[j] = new_weights_halfway[j] / other_sum * (1 - halfway_weight)
+        # Get tracking error contribution for this asset
+        te_contrib_pct = te_contribution_pct[i]
         
-        stats_halfway = portfolio_stats_from_weights(new_weights_halfway, mu_percent, Sigma_percent_sq, rf_percent)
-        sharpe_improvement_halfway = stats_halfway['sharpe'] - baseline_sharpe
-        return_improvement_halfway = stats_halfway['return'] - baseline_return
+        # Flag if not in optimal portfolio
+        not_in_optimal = ticker not in optimal_tickers
         
-        # Strategy 2: Move fully to optimal
-        new_weights_full = w_actual.copy()
-        new_weights_full[i] = optimal_weight
-        # Renormalize
-        other_sum = new_weights_full.sum() - optimal_weight
-        if other_sum > 0:
-            for j in range(len(tickers)):
-                if j != i:
-                    new_weights_full[j] = new_weights_full[j] / other_sum * (1 - optimal_weight)
-        
-        stats_full = portfolio_stats_from_weights(new_weights_full, mu_percent, Sigma_percent_sq, rf_percent)
-        sharpe_improvement_full = stats_full['sharpe'] - baseline_sharpe
-        return_improvement_full = stats_full['return'] - baseline_return
-        
-        # Choose the better strategy
-        if abs(sharpe_improvement_full) > abs(sharpe_improvement_halfway):
-            sharpe_improvement = sharpe_improvement_full
-            return_improvement = return_improvement_full
-            new_weight = optimal_weight
-            action_type = "full"
+        # Calculate correlation with optimal portfolio
+        if ticker in returns_df.columns and len(optimal_tickers) > 0:
+            corr_with_optimal = calculate_asset_correlation_with_portfolio(
+                returns_df, ticker, w_optimal[:len(optimal_tickers)], optimal_tickers
+            )
         else:
-            sharpe_improvement = sharpe_improvement_halfway
-            return_improvement = return_improvement_halfway
-            new_weight = halfway_weight
-            action_type = "halfway"
+            corr_with_optimal = 0.0
         
-        # Only keep positive improvements
-        if sharpe_improvement <= 0:
+        # Find best substitute in optimal portfolio
+        substitute_ticker = None
+        substitute_corr = 0.0
+        is_substitute = False
+        if not_in_optimal and ticker in returns_df.columns:
+            substitute_ticker, substitute_corr, is_substitute = find_best_substitute_in_optimal(
+                ticker, optimal_tickers, returns_df
+            )
+        
+        # Calculate marginal Sharpe contribution
+        marginal_sharpe = calculate_marginal_sharpe_contribution(
+            w_actual, i, mu_decimal, Sigma_decimal, rf_decimal
+        )
+        
+        # Test different adjustment strategies
+        strategies = []
+        
+        # Strategy 1: Move fully to optimal
+        if current_weight < 0.001 and optimal_weight > 0.001:
+            # Asset not held - suggest adding
+            new_weights = w_actual.copy()
+            new_weights[i] = optimal_weight
+            other_sum = new_weights.sum() - optimal_weight
+            if other_sum > 0:
+                for j in range(len(tickers)):
+                    if j != i:
+                        new_weights[j] = new_weights[j] / other_sum * (1 - optimal_weight)
+            
+            stats = portfolio_stats_from_weights(new_weights, mu_percent, Sigma_percent_sq, rf_percent)
+            strategies.append({
+                'type': 'add',
+                'new_weight': optimal_weight,
+                'weights': new_weights,
+                'stats': stats,
+                'description': f"➕ Add {optimal_weight*100:.1f}%"
+            })
+        
+        elif optimal_weight < 0.001 and current_weight > 0.001:
+            # Asset should be removed
+            new_weights = w_actual.copy()
+            new_weights[i] = 0
+            other_sum = new_weights.sum()
+            if other_sum > 0:
+                new_weights = new_weights / other_sum
+            
+            stats = portfolio_stats_from_weights(new_weights, mu_percent, Sigma_percent_sq, rf_percent)
+            
+            if not_in_optimal:
+                if is_substitute and substitute_ticker:
+                    desc = f"❌ Remove (currently {current_weight*100:.1f}%) - Substitute: {substitute_ticker} (corr: {substitute_corr:.2f})"
+                else:
+                    desc = f"❌ Remove (currently {current_weight*100:.1f}%) - Not in optimal"
+            else:
+                desc = f"❌ Remove (currently {current_weight*100:.1f}%)"
+            
+            strategies.append({
+                'type': 'remove',
+                'new_weight': 0,
+                'weights': new_weights,
+                'stats': stats,
+                'description': desc
+            })
+        
+        else:
+            # Asset needs rebalancing - test both halfway and full moves
+            
+            # Halfway
+            halfway_weight = (current_weight + optimal_weight) / 2
+            new_weights_half = w_actual.copy()
+            new_weights_half[i] = halfway_weight
+            other_sum = new_weights_half.sum() - halfway_weight
+            if other_sum > 0:
+                for j in range(len(tickers)):
+                    if j != i:
+                        new_weights_half[j] = new_weights_half[j] / other_sum * (1 - halfway_weight)
+            
+            stats_half = portfolio_stats_from_weights(new_weights_half, mu_percent, Sigma_percent_sq, rf_percent)
+            
+            if halfway_weight > current_weight:
+                desc_half = f"⬆️ Increase from {current_weight*100:.1f}% to {halfway_weight*100:.1f}%"
+            else:
+                desc_half = f"⬇️ Decrease from {current_weight*100:.1f}% to {halfway_weight*100:.1f}%"
+            
+            strategies.append({
+                'type': 'rebalance_half',
+                'new_weight': halfway_weight,
+                'weights': new_weights_half,
+                'stats': stats_half,
+                'description': desc_half
+            })
+            
+            # Full move to optimal
+            new_weights_full = w_actual.copy()
+            new_weights_full[i] = optimal_weight
+            other_sum = new_weights_full.sum() - optimal_weight
+            if other_sum > 0:
+                for j in range(len(tickers)):
+                    if j != i:
+                        new_weights_full[j] = new_weights_full[j] / other_sum * (1 - optimal_weight)
+            
+            stats_full = portfolio_stats_from_weights(new_weights_full, mu_percent, Sigma_percent_sq, rf_percent)
+            
+            if optimal_weight > current_weight:
+                desc_full = f"⬆️ Increase from {current_weight*100:.1f}% to {optimal_weight*100:.1f}% (full)"
+            else:
+                desc_full = f"⬇️ Decrease from {current_weight*100:.1f}% to {optimal_weight*100:.1f}% (full)"
+            
+            strategies.append({
+                'type': 'rebalance_full',
+                'new_weight': optimal_weight,
+                'weights': new_weights_full,
+                'stats': stats_full,
+                'description': desc_full
+            })
+        
+        # Evaluate each strategy and pick the best
+        best_strategy = None
+        best_sharpe_improvement = -999
+        
+        for strategy in strategies:
+            sharpe_improvement = strategy['stats']['sharpe'] - baseline_sharpe
+            if sharpe_improvement > best_sharpe_improvement:
+                best_sharpe_improvement = sharpe_improvement
+                best_strategy = strategy
+        
+        if best_strategy is None or best_sharpe_improvement <= 0:
             continue
         
-        # Format the action description
-        if current_weight < 0.001 and new_weight > 0.001:
-            # Adding new position
-            action = f"Add {new_weight*100:.1f}%"
-        elif new_weight < 0.001 and current_weight > 0.001:
-            # Removing position
-            action = f"Remove completely (currently {current_weight*100:.1f}%)"
-        elif new_weight > current_weight:
-            # Increasing
-            action = f"Increase from {current_weight*100:.1f}% to {new_weight*100:.1f}%"
-        else:
-            # Decreasing
-            action = f"Decrease from {current_weight*100:.1f}% to {new_weight*100:.1f}%"
+        # Calculate comprehensive metrics for the best strategy
+        sharpe_improvement = best_strategy['stats']['sharpe'] - baseline_sharpe
+        return_improvement = best_strategy['stats']['return'] - baseline_return
         
-        # Impact score: weighted combination (Sharpe is most important)
+        # Calculate how much this change reduces tracking error
+        te_after, _, _ = calculate_tracking_error_contribution(
+            best_strategy['weights'], w_optimal, Sigma_decimal
+        )
+        te_reduction = te_total - te_after
+        
+        # Compute impact score considering:
+        # 1. Sharpe improvement (most important)
+        # 2. Tracking error contribution (how misaligned this asset is)
+        # 3. Return improvement
+        # 4. Whether it's a substitute (less urgent if highly correlated with optimal)
+        
         impact_score = sharpe_improvement * 100 + return_improvement * 2
+        
+        # Boost priority for high TE contributors
+        if abs(te_contrib_pct) > 10:  # Contributing >10% to tracking error
+            impact_score *= 1.3
+        
+        # For assets not in optimal, adjust by substitution effect
+        if not_in_optimal:
+            if is_substitute and abs(substitute_corr) > 0.7:
+                # High correlation with something in optimal = less urgent
+                impact_score *= 0.8
+                urgency = "Low"
+            elif abs(corr_with_optimal) > 0.5:
+                # Moderate correlation with overall optimal portfolio
+                impact_score *= 0.9
+                urgency = "Medium"
+            else:
+                # Low correlation = very different from optimal = urgent to remove
+                impact_score *= 1.2
+                urgency = "High"
+        else:
+            urgency = "Medium"
         
         suggestions.append({
             'Ticker': ticker,
-            'Action': action,
+            'Action': best_strategy['description'],
             'Sharpe Improvement': sharpe_improvement,
             'Return Improvement (%)': return_improvement,
-            'Impact Score': impact_score
+            'TE Reduction (%)': te_reduction,
+            'TE Contribution (%)': te_contrib_pct,
+            'Corr with Optimal': corr_with_optimal,
+            'Marginal Sharpe': marginal_sharpe,
+            'Impact Score': impact_score,
+            'Not_In_Optimal': not_in_optimal,
+            'Urgency': urgency,
+            'Substitute': f"{substitute_ticker} ({substitute_corr:.2f})" if substitute_ticker else "-"
         })
     
     # Sort by impact score (highest first)
@@ -925,7 +1190,7 @@ if run_opt:
                 col4.metric("Risky Allocation", f"{allocation['alpha']*100:.1f}%")
                 st.markdown("---")
                 
-                tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Allocation", "📈 Efficient Frontier", "⚠️ Risk Analysis", "📋 Model Details", "🔁 Portfolio Comparison"])
+                tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Allocation", "📈 Efficient Frontier", "⚠️ Risk Analysis", "📋 Model Details", "🔍 Portfolio Comparison"])
                 
                 with tab1:
                     st.subheader("Final Portfolio Allocation")
@@ -1212,12 +1477,15 @@ if run_opt:
                             
                             # --- Improvement Suggestions ---
                             st.markdown("---")
-                            st.markdown("### 🎯 Top Suggestions to Improve Your Portfolio")
-                            st.info("Each suggestion shows a **single practical change** you can make, ranked by effectiveness.")
+                            st.markdown("### 🎯 Correlation-Aware Portfolio Improvement Suggestions")
+                            st.info("💡 **Advanced Analysis**: These suggestions account for correlations, tracking error contributions, and substitution effects. Assets highly correlated with the optimal portfolio are less urgent to change.")
                             
                             suggestions = generate_improvement_suggestions(
                                 w_act, w_opt, expanded, mu_exp.values, 
-                                Sigma_percent_sq_exp.values, rf_rate, top_n=10
+                                Sigma_percent_sq_exp.values, rf_rate, 
+                                optimal_tickers=tickers,  # Pass original optimal tickers
+                                returns_df=returns_exp,   # Pass returns for correlation analysis
+                                top_n=15
                             )
                             
                             if suggestions:
@@ -1226,48 +1494,121 @@ if run_opt:
                                 # Add ranking
                                 suggestions_df.insert(0, 'Rank', range(1, len(suggestions_df) + 1))
                                 
-                                # Format for display
-                                st.dataframe(
-                                    suggestions_df.style.format({
-                                        'Sharpe Improvement': '{:+.4f}',
-                                        'Return Improvement (%)': '{:+.2f}%',
-                                        'Impact Score': '{:.1f}'
-                                    }).background_gradient(subset=['Impact Score'], cmap='Greens'),
-                                    use_container_width=True,
-                                    hide_index=True
-                                )
+                                # Create urgency categories
+                                high_urgency = suggestions_df[suggestions_df['Urgency'] == 'High'].copy()
+                                med_urgency = suggestions_df[suggestions_df['Urgency'] == 'Medium'].copy()
+                                low_urgency = suggestions_df[suggestions_df['Urgency'] == 'Low'].copy()
+                                
+                                # Display high urgency first
+                                if not high_urgency.empty:
+                                    st.markdown("#### 🚨 High Priority: Poorly Correlated Assets")
+                                    st.error("⚠️ **These assets behave very differently from your optimal portfolio and should be addressed first.**")
+                                    
+                                    display_cols = ['Rank', 'Ticker', 'Action', 'Sharpe Improvement', 
+                                                   'Return Improvement (%)', 'TE Contribution (%)', 
+                                                   'Corr with Optimal', 'Substitute']
+                                    
+                                    st.dataframe(
+                                        high_urgency[display_cols].style.format({
+                                            'Sharpe Improvement': '{:+.4f}',
+                                            'Return Improvement (%)': '{:+.2f}%',
+                                            'TE Contribution (%)': '{:+.1f}%',
+                                            'Corr with Optimal': '{:.2f}'
+                                        }).background_gradient(subset=['Sharpe Improvement'], cmap='RdYlGn', vmin=-0.05, vmax=0.05),
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+                                    st.caption("📊 **TE Contribution**: How much this asset's misallocation contributes to tracking error")
+                                    st.caption("🔗 **Corr with Optimal**: How similarly this asset moves with your optimal portfolio (higher = more similar)")
+                                    st.caption("🔄 **Substitute**: Highly correlated asset in optimal portfolio that serves a similar role")
+                                
+                                # Display medium urgency
+                                if not med_urgency.empty:
+                                    st.markdown("#### 📊 Medium Priority: Standard Rebalancing")
+                                    
+                                    display_cols = ['Rank', 'Ticker', 'Action', 'Sharpe Improvement', 
+                                                   'Return Improvement (%)', 'TE Contribution (%)']
+                                    
+                                    st.dataframe(
+                                        med_urgency[display_cols].style.format({
+                                            'Sharpe Improvement': '{:+.4f}',
+                                            'Return Improvement (%)': '{:+.2f}%',
+                                            'TE Contribution (%)': '{:+.1f}%'
+                                        }).background_gradient(subset=['Sharpe Improvement'], cmap='Greens'),
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+                                
+                                # Display low urgency
+                                if not low_urgency.empty:
+                                    st.markdown("#### ✅ Low Priority: Minor Adjustments")
+                                    st.success("These assets are highly correlated with the optimal portfolio, so they're reasonable substitutes. Changing them has less impact.")
+                                    
+                                    display_cols = ['Rank', 'Ticker', 'Action', 'Sharpe Improvement', 
+                                                   'Corr with Optimal', 'Substitute']
+                                    
+                                    st.dataframe(
+                                        low_urgency[display_cols].style.format({
+                                            'Sharpe Improvement': '{:+.4f}',
+                                            'Corr with Optimal': '{:.2f}'
+                                        }),
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+                                
+                                # Add explanation
+                                with st.expander("📖 Understanding These Metrics"):
+                                    st.markdown("""
+                                    ### Key Metrics Explained
+                                    
+                                    **Sharpe Improvement** 
+                                    - How much your risk-adjusted return improves with this change
+                                    - Even +0.01 is meaningful over time
+                                    
+                                    **Return Improvement**
+                                    - Expected annual return increase in percentage points
+                                    - Compounds significantly over years
+                                    
+                                    **TE Contribution (%)**
+                                    - What percentage of your tracking error (deviation from optimal) comes from this asset
+                                    - High values (>10%) mean this asset is a major source of inefficiency
+                                    - *This metric accounts for correlations!*
+                                    
+                                    **Corr with Optimal**
+                                    - Correlation between this asset and your optimal portfolio
+                                    - High correlation (>0.7) means this asset behaves similarly to optimal
+                                    - Low correlation (<0.3) means very different behavior = higher priority to fix
+                                    
+                                    **Substitute**
+                                    - Which asset in the optimal portfolio is most similar to this one
+                                    - If substitute has high correlation (>0.7), they serve similar purposes
+                                    - Example: "VTI (0.92)" means this asset is 92% correlated with VTI
+                                    
+                                    **Urgency Levels**
+                                    - 🚨 **High**: Low correlation with optimal, significant TE contribution
+                                    - 📊 **Medium**: Standard rebalancing needs
+                                    - ✅ **Low**: High correlation with optimal (reasonable substitute)
+                                    
+                                    ### Why Correlation Matters
+                                    
+                                    **Example**: You hold XXX (18% allocation) which is NOT in optimal portfolio.
+                                    - If XXX has 0.95 correlation with YYY (which IS in optimal), they're near-perfect substitutes
+                                    - Swapping XXX for YYY has minimal impact → Low urgency
+                                    - But if XXX has 0.2 correlation with the entire optimal portfolio, it's adding very different (and sub-optimal) exposure → High urgency!
+                                    
+                                    This is why we can't just look at allocation differences - we must consider the correlation structure!
+                                    """)
                                 
                                 st.markdown("""
-                                **How to read this:**
-                                - **Rank**: Higher impact suggestions appear first
-                                - **Action**: The specific change to make
-                                - **Sharpe Improvement**: How much your risk-adjusted returns improve
-                                - **Return Improvement**: How much your expected annual return increases
-                                - **Impact Score**: Overall benefit (higher is better)
+                                **How to use these suggestions:**
+                                1. Start with 🚨 **High Priority** items - biggest impact
+                                2. Then address 📊 **Medium Priority** - standard improvements
+                                3. ✅ **Low Priority** items are optional (already have good substitutes)
                                 
-                                💡 **Tip**: Start with the top-ranked suggestions for maximum impact!
+                                💡 **Pro tip**: If an asset shows "Low urgency" with a good substitute, you may choose to keep it if there are tax implications or transaction costs.
                                 """)
                             else:
                                 st.success("✅ Your portfolio is already well-optimized! No significant improvements available.")
-                            
-                            # --- Assets only in your portfolio ---
-                            actual_only = [t for t in actual.keys() if t not in tickers]
-                            if actual_only:
-                                st.markdown("---")
-                                st.markdown("### 🔍 Assets Not in Optimal Portfolio")
-                                st.info(f"These assets are in your portfolio but not recommended by the optimizer: **{', '.join(actual_only)}**")
-                                
-                                # Show their expected returns
-                                only_df = pd.DataFrame({
-                                    'Ticker': actual_only,
-                                    'Your Allocation (%)': [actual[t] * 100 for t in actual_only],
-                                    'Expected Return (%)': [mu_exp.get(t, 0) for t in actual_only]
-                                })
-                                st.dataframe(
-                                    only_df.style.format({'Your Allocation (%)': '{:.2f}%', 'Expected Return (%)': '{:.2f}%'}),
-                                    hide_index=True,
-                                    use_container_width=True
-                                )
                             
                             st.markdown("---")
                             st.caption("⚠️ **Disclaimer**: This analysis ignores transaction costs, taxes, and liquidity constraints. Use as guidance, not financial advice.")
