@@ -383,6 +383,109 @@ def overall_deviation_score(sharpe_gap, return_gap_percent, vol_gap_percent):
     return min(100.0, total)
 
 
+def generate_improvement_suggestions(w_actual, w_optimal, tickers, mu_percent, Sigma_percent_sq, rf_percent, top_n=10):
+    """
+    Generate ranked suggestions for improving the portfolio one ticker at a time.
+    
+    Returns a list of suggestions, each with:
+    - Ticker
+    - Action (e.g., "Increase from 10% to 15%", "Add 8%", "Remove completely")
+    - Sharpe improvement
+    - Return improvement
+    - Impact score (combination of improvements)
+    """
+    suggestions = []
+    
+    # Calculate baseline stats
+    baseline_stats = portfolio_stats_from_weights(w_actual, mu_percent, Sigma_percent_sq, rf_percent)
+    baseline_sharpe = baseline_stats['sharpe']
+    baseline_return = baseline_stats['return']
+    
+    # For each ticker, consider changes
+    for i, ticker in enumerate(tickers):
+        current_weight = w_actual[i]
+        optimal_weight = w_optimal[i]
+        
+        # Skip if already at optimal (within 0.5%)
+        if abs(current_weight - optimal_weight) < 0.005:
+            continue
+        
+        # Strategy 1: Move halfway to optimal (practical compromise)
+        halfway_weight = (current_weight + optimal_weight) / 2
+        new_weights_halfway = w_actual.copy()
+        new_weights_halfway[i] = halfway_weight
+        # Renormalize other weights proportionally
+        other_sum = new_weights_halfway.sum() - halfway_weight
+        if other_sum > 0:
+            for j in range(len(tickers)):
+                if j != i:
+                    new_weights_halfway[j] = new_weights_halfway[j] / other_sum * (1 - halfway_weight)
+        
+        stats_halfway = portfolio_stats_from_weights(new_weights_halfway, mu_percent, Sigma_percent_sq, rf_percent)
+        sharpe_improvement_halfway = stats_halfway['sharpe'] - baseline_sharpe
+        return_improvement_halfway = stats_halfway['return'] - baseline_return
+        
+        # Strategy 2: Move fully to optimal
+        new_weights_full = w_actual.copy()
+        new_weights_full[i] = optimal_weight
+        # Renormalize
+        other_sum = new_weights_full.sum() - optimal_weight
+        if other_sum > 0:
+            for j in range(len(tickers)):
+                if j != i:
+                    new_weights_full[j] = new_weights_full[j] / other_sum * (1 - optimal_weight)
+        
+        stats_full = portfolio_stats_from_weights(new_weights_full, mu_percent, Sigma_percent_sq, rf_percent)
+        sharpe_improvement_full = stats_full['sharpe'] - baseline_sharpe
+        return_improvement_full = stats_full['return'] - baseline_return
+        
+        # Choose the better strategy
+        if abs(sharpe_improvement_full) > abs(sharpe_improvement_halfway):
+            sharpe_improvement = sharpe_improvement_full
+            return_improvement = return_improvement_full
+            new_weight = optimal_weight
+            action_type = "full"
+        else:
+            sharpe_improvement = sharpe_improvement_halfway
+            return_improvement = return_improvement_halfway
+            new_weight = halfway_weight
+            action_type = "halfway"
+        
+        # Only keep positive improvements
+        if sharpe_improvement <= 0:
+            continue
+        
+        # Format the action description
+        if current_weight < 0.001 and new_weight > 0.001:
+            # Adding new position
+            action = f"Add {new_weight*100:.1f}%"
+        elif new_weight < 0.001 and current_weight > 0.001:
+            # Removing position
+            action = f"Remove completely (currently {current_weight*100:.1f}%)"
+        elif new_weight > current_weight:
+            # Increasing
+            action = f"Increase from {current_weight*100:.1f}% to {new_weight*100:.1f}%"
+        else:
+            # Decreasing
+            action = f"Decrease from {current_weight*100:.1f}% to {new_weight*100:.1f}%"
+        
+        # Impact score: weighted combination (Sharpe is most important)
+        impact_score = sharpe_improvement * 100 + return_improvement * 2
+        
+        suggestions.append({
+            'Ticker': ticker,
+            'Action': action,
+            'Sharpe Improvement': sharpe_improvement,
+            'Return Improvement (%)': return_improvement,
+            'Impact Score': impact_score
+        })
+    
+    # Sort by impact score (highest first)
+    suggestions = sorted(suggestions, key=lambda x: x['Impact Score'], reverse=True)
+    
+    return suggestions[:top_n]
+
+
 # ============================================================================
 # STREAMLIT UI
 # ============================================================================
@@ -1106,6 +1209,46 @@ if run_opt:
                             )
                             
                             st.caption("💡 Positive difference = You're overweight. Negative = You're underweight.")
+                            
+                            # --- Improvement Suggestions ---
+                            st.markdown("---")
+                            st.markdown("### 🎯 Top Suggestions to Improve Your Portfolio")
+                            st.info("Each suggestion shows a **single practical change** you can make, ranked by effectiveness.")
+                            
+                            suggestions = generate_improvement_suggestions(
+                                w_act, w_opt, expanded, mu_exp.values, 
+                                Sigma_percent_sq_exp.values, rf_rate, top_n=10
+                            )
+                            
+                            if suggestions:
+                                suggestions_df = pd.DataFrame(suggestions)
+                                
+                                # Add ranking
+                                suggestions_df.insert(0, 'Rank', range(1, len(suggestions_df) + 1))
+                                
+                                # Format for display
+                                st.dataframe(
+                                    suggestions_df.style.format({
+                                        'Sharpe Improvement': '{:+.4f}',
+                                        'Return Improvement (%)': '{:+.2f}%',
+                                        'Impact Score': '{:.1f}'
+                                    }).background_gradient(subset=['Impact Score'], cmap='Greens'),
+                                    use_container_width=True,
+                                    hide_index=True
+                                )
+                                
+                                st.markdown("""
+                                **How to read this:**
+                                - **Rank**: Higher impact suggestions appear first
+                                - **Action**: The specific change to make
+                                - **Sharpe Improvement**: How much your risk-adjusted returns improve
+                                - **Return Improvement**: How much your expected annual return increases
+                                - **Impact Score**: Overall benefit (higher is better)
+                                
+                                💡 **Tip**: Start with the top-ranked suggestions for maximum impact!
+                                """)
+                            else:
+                                st.success("✅ Your portfolio is already well-optimized! No significant improvements available.")
                             
                             # --- Assets only in your portfolio ---
                             actual_only = [t for t in actual.keys() if t not in tickers]
